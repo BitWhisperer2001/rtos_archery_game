@@ -22,7 +22,7 @@ If you want to build one yourself, researching and developing it according to yo
 | DO LED_LIFE | PC7 |
 | DO BUZZER | PA6 |
 | DI BT_UP | PA4 |
-| DI BT_UP | PB0 |
+| DI BT_DOWN | PB0 |
 | 3V3 | 3V3 |
 | 5V | 5V |
 | GND | GND|
@@ -49,7 +49,7 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 `Unplug and plug back in for it to take effect.`
-* Step 5: Buid and Flash
+* Step 5: Build and Flash
 ```
 make
 make flash
