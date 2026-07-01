@@ -49,6 +49,7 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 > Unplug and plug back in for it to take effect.
+
 * Step 5: Build and Flash
 ```
 make
