@@ -3,6 +3,7 @@
 
 #include "arrow.h"
 
+#include "app_state.h"
 #include "archery.h"
 #include "bang.h"
 #include "bitmap.h"
@@ -88,7 +89,7 @@ static void task_arrow_update_handler(void *param)
          * The lifecycle check and mutation are one mutex transaction.  A
          * GAME_OVER transition cannot be followed by a stale arrow update.
          */
-        if (!screen_gameplay_is_running_locked()) {
+        if (!app_state_is_running_locked()) {
             game_state_unlock();
             continue;
         }

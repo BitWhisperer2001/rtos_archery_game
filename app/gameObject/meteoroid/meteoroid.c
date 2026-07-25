@@ -4,7 +4,9 @@
 
 #include "meteoroid.h"
 
+#include "app_state.h"
 #include "bitmap.h"
+#include "difficulty_manager.h"
 #include "game_state.h"
 #include "screen_task.h"
 #include "system_init.h"
@@ -110,7 +112,7 @@ static void meteoroid_task_handler(void *param)
          * Check mode while holding the object mutex.  Once game over publishes
          * its transition, no delayed timer notification can mutate new state.
          */
-        if (!screen_gameplay_is_running_locked()) {
+        if (!app_state_is_running_locked()) {
             game_state_unlock();
             continue;
         }
@@ -147,7 +149,7 @@ void meteoroid_reset_for_new_game(void)
      */
     last_spawn_tick = 0U;
     cadence_started = false;
-    meteoroid_timer_period_ms = METEOROID_PERIOD_INITIAL_MS;
+    meteoroid_timer_period_ms = difficulty_manager_initial_period_ms();
 
     game_state_unlock();
 }

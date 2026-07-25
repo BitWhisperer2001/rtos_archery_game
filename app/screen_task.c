@@ -4,6 +4,8 @@
 
 #include "screen_task.h"
 
+#include "app_settings.h"
+#include "app_state.h"
 #include "archery.h"
 #include "arrow.h"
 #include "bang.h"
@@ -12,9 +14,10 @@
 #include "buzzer_task.h"
 #include "game_session.h"
 #include "game_state.h"
+#include "game_stats.h"
 #include "meteoroid.h"
+#include "saver_engine.h"
 #include "screen.h"
-#include "screen_saver.h"
 #include "ssd1306.h"
 #include "system_init.h"
 #include "system_log.h"
@@ -31,22 +34,25 @@ TaskHandle_t task_update_screen_handle = NULL;
 #define SCREEN_ALL_BITS \
     (SCREEN_UPDATE_BIT | SCREEN_GAME_OVER_BIT | SCREEN_GAME_START_BIT | \
      SCREEN_SAVER_EXIT_BIT | SCREEN_SAVER_ADD_BIT | \
-     SCREEN_SAVER_REMOVE_BIT | SCREEN_RETURN_TO_START_BIT)
+     SCREEN_SAVER_REMOVE_BIT | SCREEN_RETURN_TO_START_BIT | \
+     SCREEN_PAUSE_BIT | SCREEN_RESUME_BIT | SCREEN_SAVER_NEXT_BIT | \
+     SCREEN_SAVER_PREVIOUS_BIT | SCREEN_SETTINGS_ENTER_BIT | \
+     SCREEN_SETTINGS_EXIT_BIT | SCREEN_SETTINGS_DIFFICULTY_BIT | \
+     SCREEN_SETTINGS_EFFECT_BIT | SCREEN_SETTINGS_SOUND_BIT | \
+     SCREEN_WAKE_BIT)
 
-#define SCREEN_IDLE_TIMEOUT_MS          (10000U)
 #define SCREEN_SAVER_FRAME_PERIOD_MS    (40U)
+#define SCREEN_SAVER_DIM_PERIOD_MS      (100U)
+#define SCREEN_SAVER_DIM_AFTER_MS       (60000U)
 
 /* uint32_t needs at most ten decimal digits plus the string terminator. */
 static char your_score[11] = {0};
 static char best_score[11] = {0};
 
-/*
- * Lifecycle state shares game_state_mutex with object data.  This avoids
- * relying on volatile (which does not provide inter-task synchronization).
- */
-static screen_mode_t screen_mode = SCREEN_MODE_WAITING_FOR_START;
-static screen_saver_t screen_saver;
+static saver_engine_t saver_engine;
 static TickType_t screen_saver_next_frame = 0U;
+static TickType_t screen_saver_started_at = 0U;
+static bool screen_powered = true;
 
 typedef struct {
     game_archery_t archery;
@@ -65,13 +71,6 @@ static bool screen_present(void)
     return SSD1306_UpdateScreen() != 0U;
 }
 
-static void screen_set_mode(screen_mode_t mode)
-{
-    game_state_lock();
-    screen_mode = mode;
-    game_state_unlock();
-}
-
 static void screen_display_waiting_for_start(void)
 {
     SSD1306_Clear();
@@ -79,7 +78,9 @@ static void screen_display_waiting_for_start(void)
     SSD1306_Puts("ARCHERY GAME", &Font_11x18, SSD1306_COLOR_WHITE);
     SSD1306_GotoXY(2, 24);
     SSD1306_Puts("Design by Minh Chi", &Font_7x10, SSD1306_COLOR_WHITE);
-    SSD1306_GotoXY(4, 49);
+    SSD1306_GotoXY(13, 39);
+    SSD1306_Puts("HOLD OK: SETTINGS", &Font_6x8, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(4, 53);
     SSD1306_Puts("PRESS OK TO START", &Font_7x10, SSD1306_COLOR_WHITE);
 
     if (!screen_present()) {
@@ -91,25 +92,54 @@ static void screen_display_waiting_for_start(void)
      * The start melody describes the visible prompt, not the gameplay action.
      * Publish it only after the framebuffer has reached the OLED successfully.
      */
-    configASSERT(buzzer_event_state != NULL);
-    xEventGroupSetBits(buzzer_event_state, GAME_START_SOUND_BIT);
+    (void)buzzer_request_cue(AUDIO_CUE_GAME_START);
 }
 
 static void screen_render_saver_frame(void)
 {
     SSD1306_Clear();
 
-    for (uint8_t i = 0U; i < screen_saver_count(&screen_saver); i++) {
-        int16_t x;
-        int16_t y;
+    if (saver_engine_effect(&saver_engine) == SAVER_EFFECT_BUBBLES) {
+        for (uint8_t i = 0U;
+             i < saver_engine_circle_count(&saver_engine);
+             i++) {
+            int16_t x;
+            int16_t y;
 
-        if (screen_saver_get_circle(&screen_saver, i, &x, &y)) {
-            /*
-             * Draw an outline rather than a filled disk.  Ten circles therefore
-             * remain visually readable even when their paths overlap.
-             */
-            SSD1306_DrawCircle(x, y, SCREEN_SAVER_CIRCLE_RADIUS,
-                               SSD1306_COLOR_WHITE);
+            if (saver_engine_get_circle(&saver_engine, i, &x, &y)) {
+                SSD1306_DrawCircle(x, y, SCREEN_SAVER_CIRCLE_RADIUS,
+                                   SSD1306_COLOR_WHITE);
+            }
+        }
+    } else if (saver_engine_effect(&saver_engine) ==
+               SAVER_EFFECT_STARFIELD) {
+        for (uint8_t i = 0U;
+             i < saver_engine_star_count(&saver_engine);
+             i++) {
+            int16_t x;
+            int16_t y;
+
+            if (saver_engine_get_star(&saver_engine, i, &x, &y) &&
+                (x >= 0) && (y >= 0)) {
+                SSD1306_DrawPixel((uint16_t)x, (uint16_t)y,
+                                  SSD1306_COLOR_WHITE);
+            }
+        }
+    } else {
+        for (uint8_t wave = 0U;
+             wave < saver_engine_wave_count(&saver_engine);
+             wave++) {
+            int16_t previous_y =
+                saver_engine_wave_y(&saver_engine, wave, 0U);
+
+            for (uint8_t x = 2U; x < SSD1306_WIDTH; x += 2U) {
+                int16_t y = saver_engine_wave_y(&saver_engine, wave, x);
+                SSD1306_DrawLine((uint16_t)(x - 2U),
+                                 (uint16_t)previous_y,
+                                 x, (uint16_t)y,
+                                 SSD1306_COLOR_WHITE);
+                previous_y = y;
+            }
         }
     }
 
@@ -120,20 +150,24 @@ static void screen_render_saver_frame(void)
 
 static void screen_enter_saver(void)
 {
+    app_settings_t settings = app_settings_get();
+
     /*
      * A new session always restarts at one centered circle.  The time-based
      * seed changes the random positions and directions of later UP additions.
      */
-    screen_saver_init(&screen_saver,
-                      sys_get_tick() ^ 0xA511E9B3UL);
+    saver_engine_init(&saver_engine,
+                      sys_get_tick() ^ 0xA511E9B3UL,
+                      (saver_effect_t)settings.saver_effect);
     /*
      * Establish the deadline before rendering.  OLED transfer time is therefore
      * included in the 40 ms period instead of being added on top of it.
      */
+    screen_saver_started_at = xTaskGetTickCount();
     screen_saver_next_frame =
-        xTaskGetTickCount() +
+        screen_saver_started_at +
         pdMS_TO_TICKS(SCREEN_SAVER_FRAME_PERIOD_MS);
-    screen_set_mode(SCREEN_MODE_SCREENSAVER);
+    app_state_set(APP_STATE_SCREENSAVER);
     screen_render_saver_frame();
 }
 
@@ -143,17 +177,18 @@ static void screen_leave_saver(void)
      * OK exits only to the normal start screen.  A second, deliberate OK press
      * is required to launch gameplay.
      */
-    screen_set_mode(SCREEN_MODE_WAITING_FOR_START);
+    app_state_set(APP_STATE_WAITING_FOR_START);
     screen_display_waiting_for_start();
 }
 
-static TickType_t screen_wait_timeout(screen_mode_t mode)
+static TickType_t screen_wait_timeout(app_state_t mode)
 {
-    if (mode == SCREEN_MODE_WAITING_FOR_START) {
-        return pdMS_TO_TICKS(SCREEN_IDLE_TIMEOUT_MS);
+    if (mode == APP_STATE_WAITING_FOR_START) {
+        app_settings_t settings = app_settings_get();
+        return pdMS_TO_TICKS((uint32_t)settings.saver_timeout_s * 1000U);
     }
 
-    if (mode == SCREEN_MODE_SCREENSAVER) {
+    if (mode == APP_STATE_SCREENSAVER) {
         TickType_t now = xTaskGetTickCount();
 
         /*
@@ -172,7 +207,13 @@ static TickType_t screen_wait_timeout(screen_mode_t mode)
 static void screen_schedule_next_saver_frame(void)
 {
     TickType_t now = xTaskGetTickCount();
-    TickType_t period = pdMS_TO_TICKS(SCREEN_SAVER_FRAME_PERIOD_MS);
+    uint32_t elapsed_ms =
+        (uint32_t)((now - screen_saver_started_at) * portTICK_PERIOD_MS);
+    uint32_t period_ms =
+        (elapsed_ms >= SCREEN_SAVER_DIM_AFTER_MS)
+            ? SCREEN_SAVER_DIM_PERIOD_MS
+            : SCREEN_SAVER_FRAME_PERIOD_MS;
+    TickType_t period = pdMS_TO_TICKS(period_ms);
 
     /*
      * Advance from the previous deadline, not from "now".  If a slow I2C retry
@@ -318,6 +359,8 @@ static void screen_display_game_over(void)
 {
     uint32_t final_score;
     uint32_t final_best;
+    game_stats_snapshot_t stats = game_stats_get();
+    char stats_text[22];
 
     game_state_lock();
     final_score = game_border.game_score;
@@ -329,20 +372,26 @@ static void screen_display_game_over(void)
                                 SSD1306_COLOR_WHITE);
     SSD1306_GotoXY(18, 5);
     SSD1306_Puts("GAME OVER", &Font_11x18, SSD1306_COLOR_BLACK);
-    SSD1306_GotoXY(2, 27);
-    SSD1306_Puts("BEST SCORE:", &Font_7x10, SSD1306_COLOR_BLACK);
+    SSD1306_GotoXY(2, 25);
+    SSD1306_Puts("BEST:", &Font_6x8, SSD1306_COLOR_BLACK);
     snprintf(best_score, sizeof(best_score), "%u", (unsigned int)final_best);
-    SSD1306_GotoXY(79, 27);
-    SSD1306_Puts(best_score, &Font_7x10, SSD1306_COLOR_BLACK);
-    SSD1306_GotoXY(2, 39);
-    SSD1306_Puts("YOUR SCORE:", &Font_7x10, SSD1306_COLOR_BLACK);
+    SSD1306_GotoXY(38, 25);
+    SSD1306_Puts(best_score, &Font_6x8, SSD1306_COLOR_BLACK);
+    SSD1306_GotoXY(68, 25);
+    SSD1306_Puts("SCORE:", &Font_6x8, SSD1306_COLOR_BLACK);
     snprintf(your_score, sizeof(your_score), "%u", (unsigned int)final_score);
-    SSD1306_GotoXY(79, 39);
-    SSD1306_Puts(your_score, &Font_7x10, SSD1306_COLOR_BLACK);
+    SSD1306_GotoXY(104, 25);
+    SSD1306_Puts(your_score, &Font_6x8, SSD1306_COLOR_BLACK);
+
+    snprintf(stats_text, sizeof(stats_text), "HIT:%lu ACC:%u%%",
+             (unsigned long)stats.hits,
+             (unsigned int)stats.accuracy_percent);
+    SSD1306_GotoXY(20, 38);
+    SSD1306_Puts(stats_text, &Font_6x8, SSD1306_COLOR_BLACK);
     /*
      * Match the state machine precisely: only OK performs a software restart.
      */
-    SSD1306_GotoXY(37, 55);
+    SSD1306_GotoXY(37, 53);
     SSD1306_Puts("PRESS OK", &Font_7x10, SSD1306_COLOR_BLACK);
 
     if (!screen_present()) {
@@ -386,7 +435,8 @@ static void screen_start_game(void)
      * tick.  Timers were created during boot but are deliberately started only
      * after the user presses OK.
      */
-    screen_set_mode(SCREEN_MODE_RUNNING);
+    app_state_set(APP_STATE_RUNNING);
+    game_stats_start();
 
     screen_render_game_frame();
     xEventGroupSetBits(archery_event_state, ARCHERY_INIT_BIT);
@@ -403,6 +453,126 @@ static void screen_start_game(void)
                            pdMS_TO_TICKS(10U)) == pdPASS);
 }
 
+static void screen_display_paused(void)
+{
+    screen_render_game_frame();
+    SSD1306_DrawFilledRectangle(24, 20, 80, 24, SSD1306_COLOR_BLACK);
+    SSD1306_DrawRectangle(24, 20, 80, 24, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(36, 27);
+    SSD1306_Puts("PAUSED", &Font_11x18, SSD1306_COLOR_WHITE);
+
+    if (!screen_present()) {
+        DBG_LOG("OLED paused-screen transfer failed");
+    }
+}
+
+static void screen_pause_game(void)
+{
+    /*
+     * The request already published PAUSED, so workers reject stale wake-ups
+     * while timer stop commands are being delivered.
+     */
+    configASSERT(xTimerStop(timer_update_screen_handle,
+                            pdMS_TO_TICKS(10U)) == pdPASS);
+    configASSERT(xTimerStop((TimerHandle_t)meteoroid_timer,
+                            pdMS_TO_TICKS(10U)) == pdPASS);
+    game_stats_pause();
+    screen_display_paused();
+}
+
+static void screen_resume_game(void)
+{
+    app_state_set(APP_STATE_RUNNING);
+    game_stats_resume();
+    screen_render_game_frame();
+
+    configASSERT(xTimerStart(timer_update_screen_handle,
+                             pdMS_TO_TICKS(10U)) == pdPASS);
+    configASSERT(xTimerStart((TimerHandle_t)meteoroid_timer,
+                             pdMS_TO_TICKS(10U)) == pdPASS);
+}
+
+static const char *screen_difficulty_name(app_difficulty_t difficulty)
+{
+    static const char *const names[APP_DIFFICULTY_COUNT] = {
+        "EASY", "NORMAL", "HARD"
+    };
+    return (difficulty < APP_DIFFICULTY_COUNT) ? names[difficulty] :
+                                                 "NORMAL";
+}
+
+static void screen_display_settings(void)
+{
+    app_settings_t settings = app_settings_get();
+
+    SSD1306_Clear();
+    SSD1306_GotoXY(22, 0);
+    SSD1306_Puts("SETTINGS", &Font_11x18, SSD1306_COLOR_WHITE);
+    SSD1306_DrawFilledRectangle(0, 21, 42, 8, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(2, 22);
+    SSD1306_Puts("UP DIFF", &Font_6x8, SSD1306_COLOR_BLACK);
+    SSD1306_GotoXY(88, 22);
+    SSD1306_Puts((char *)screen_difficulty_name(settings.difficulty), &Font_6x8, SSD1306_COLOR_WHITE);
+    SSD1306_DrawFilledRectangle(0, 32, 42, 8, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(2, 33);
+    SSD1306_Puts("DOWN FX", &Font_6x8, SSD1306_COLOR_BLACK);
+    SSD1306_GotoXY(88, 33);
+    SSD1306_Puts((char *)saver_engine_effect_name((saver_effect_t)settings.saver_effect), &Font_6x8, SSD1306_COLOR_WHITE);
+    SSD1306_DrawFilledRectangle(0, 43, 78, 8, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(2, 44);
+    SSD1306_Puts("HOLD UP SOUND", &Font_6x8, SSD1306_COLOR_BLACK);
+    SSD1306_GotoXY(88, 44);
+    SSD1306_Puts(settings.sound_enabled ? "ON" : "OFF", &Font_6x8, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(25, 56);
+    SSD1306_Puts("OK: SAVE/BACK", &Font_6x8, SSD1306_COLOR_WHITE);
+
+    if (!screen_present()) {
+        DBG_LOG("OLED settings transfer failed");
+    }
+}
+
+static void screen_enter_settings(void)
+{
+    screen_display_settings();
+}
+
+static void screen_exit_settings(void)
+{
+    if (!app_settings_save()) {
+        DBG_LOG("Failed to persist application settings");
+    }
+
+    /*
+     * Apply the selected difficulty immediately to the next game, including
+     * the very first game after boot.  Session reset is safe in SETTINGS and
+     * also clears any stale input-to-gameplay pipeline state.
+     */
+    game_session_reset();
+    app_state_set(APP_STATE_WAITING_FOR_START);
+    screen_display_waiting_for_start();
+}
+
+static void screen_enter_display_sleep(void)
+{
+    /*
+     * The idle hook already executes WFI.  Turning off the OLED charge pump is
+     * the remaining large idle-power saving after prolonged inactivity.
+     */
+    SSD1306_OFF();
+    screen_powered = false;
+    app_state_set(APP_STATE_DISPLAY_SLEEP);
+}
+
+static void screen_wake_display(void)
+{
+    if (!screen_powered) {
+        SSD1306_ON();
+        screen_powered = true;
+    }
+    app_state_set(APP_STATE_WAITING_FOR_START);
+    screen_display_waiting_for_start();
+}
+
 static void screen_finish_game(void)
 {
     /*
@@ -414,8 +584,9 @@ static void screen_finish_game(void)
     configASSERT(xTimerStop((TimerHandle_t)meteoroid_timer,
                             pdMS_TO_TICKS(10U)) == pdPASS);
 
+    game_stats_finish();
     screen_update_high_score();
-    xEventGroupSetBits(buzzer_event_state, GAME_OVER_SOUND_BIT);
+    (void)buzzer_request_cue(AUDIO_CUE_GAME_OVER);
 
     vTaskDelay(pdMS_TO_TICKS(1500));
     screen_display_game_over();
@@ -424,7 +595,7 @@ static void screen_finish_game(void)
      * Input becomes active only after the result screen is actually visible.
      * This replaces external suspension of the button task with explicit state.
      */
-    screen_set_mode(SCREEN_MODE_GAME_OVER);
+    app_state_set(APP_STATE_GAME_OVER);
 }
 
 static void screen_return_to_start(void)
@@ -434,7 +605,7 @@ static void screen_return_to_start(void)
      * deterministic replay without heap churn or a disruptive MCU reset.
      */
     game_session_reset();
-    screen_set_mode(SCREEN_MODE_WAITING_FOR_START);
+    app_state_set(APP_STATE_WAITING_FOR_START);
     screen_display_waiting_for_start();
 }
 
@@ -443,7 +614,7 @@ static void task_update_screen(void *param)
     (void)param;
 
     for (;;) {
-        screen_mode_t mode = screen_get_mode();
+        app_state_t mode = app_state_get();
         EventBits_t bits = xEventGroupWaitBits(screen_event_state,
                                                SCREEN_ALL_BITS,
                                                pdTRUE,
@@ -455,13 +626,24 @@ static void task_update_screen(void *param)
              * A timeout has a different meaning in each non-game state:
              * 10 seconds enters the saver; 40 ms advances one animation frame.
              */
-            mode = screen_get_mode();
-            if (mode == SCREEN_MODE_WAITING_FOR_START) {
+            mode = app_state_get();
+            if (mode == APP_STATE_WAITING_FOR_START) {
                 screen_enter_saver();
-            } else if (mode == SCREEN_MODE_SCREENSAVER) {
-                screen_saver_step(&screen_saver);
-                screen_render_saver_frame();
-                screen_schedule_next_saver_frame();
+            } else if (mode == APP_STATE_SCREENSAVER) {
+                app_settings_t settings = app_settings_get();
+                uint32_t elapsed_ms =
+                    (uint32_t)((xTaskGetTickCount() -
+                                screen_saver_started_at) *
+                               portTICK_PERIOD_MS);
+
+                if (elapsed_ms >=
+                    ((uint32_t)settings.sleep_timeout_s * 1000U)) {
+                    screen_enter_display_sleep();
+                } else {
+                    saver_engine_step(&saver_engine);
+                    screen_render_saver_frame();
+                    screen_schedule_next_saver_frame();
+                }
             }
             continue;
         }
@@ -472,21 +654,50 @@ static void task_update_screen(void *param)
             screen_return_to_start();
         } else if ((bits & SCREEN_GAME_START_BIT) != 0U) {
             screen_start_game();
+        } else if ((bits & SCREEN_PAUSE_BIT) != 0U) {
+            screen_pause_game();
+        } else if ((bits & SCREEN_RESUME_BIT) != 0U) {
+            screen_resume_game();
+        } else if ((bits & SCREEN_WAKE_BIT) != 0U) {
+            screen_wake_display();
+        } else if ((bits & SCREEN_SETTINGS_ENTER_BIT) != 0U) {
+            screen_enter_settings();
+        } else if ((bits & SCREEN_SETTINGS_EXIT_BIT) != 0U) {
+            screen_exit_settings();
         } else if ((bits & SCREEN_SAVER_EXIT_BIT) != 0U) {
             screen_leave_saver();
-        } else if (screen_get_mode() == SCREEN_MODE_SCREENSAVER) {
+        } else if (app_state_get() == APP_STATE_SETTINGS) {
+            if ((bits & SCREEN_SETTINGS_DIFFICULTY_BIT) != 0U) {
+                app_settings_cycle_difficulty(1);
+            }
+            if ((bits & SCREEN_SETTINGS_EFFECT_BIT) != 0U) {
+                app_settings_cycle_saver_effect(1, SAVER_EFFECT_COUNT);
+            }
+            if ((bits & SCREEN_SETTINGS_SOUND_BIT) != 0U) {
+                app_settings_toggle_sound();
+            }
+            screen_display_settings();
+        } else if (app_state_get() == APP_STATE_SCREENSAVER) {
             bool saver_changed = false;
 
             if ((bits & SCREEN_SAVER_ADD_BIT) != 0U) {
-                saver_changed =
-                    screen_saver_add_circle(&screen_saver) ||
-                    saver_changed;
+                saver_changed = saver_engine_add(&saver_engine) ||
+                                saver_changed;
             }
 
             if ((bits & SCREEN_SAVER_REMOVE_BIT) != 0U) {
-                saver_changed =
-                    screen_saver_remove_circle(&screen_saver) ||
-                    saver_changed;
+                saver_changed = saver_engine_remove(&saver_engine) ||
+                                saver_changed;
+            }
+
+            if ((bits & SCREEN_SAVER_NEXT_BIT) != 0U) {
+                saver_engine_next(&saver_engine);
+                saver_changed = true;
+            }
+
+            if ((bits & SCREEN_SAVER_PREVIOUS_BIT) != 0U) {
+                saver_engine_previous(&saver_engine);
+                saver_changed = true;
             }
 
             /*
@@ -497,7 +708,7 @@ static void task_update_screen(void *param)
                 screen_render_saver_frame();
             }
         } else if (((bits & SCREEN_UPDATE_BIT) != 0U) &&
-                   (screen_get_mode() == SCREEN_MODE_RUNNING)) {
+                   (app_state_get() == APP_STATE_RUNNING)) {
             screen_render_game_frame();
         }
     }
@@ -535,122 +746,141 @@ void task_screen_begin(void)
 
     /*
      * main() is the sole execution context before vTaskStartScheduler(), so the
-     * boot splash can be sent directly.  The buzzer event group already exists;
-     * its queued start-melody event runs as soon as scheduling begins.
+     * boot splash can be sent directly.  The audio queues and owner task already
+     * exist; the queued start melody runs as soon as scheduling begins.
      */
     screen_display_waiting_for_start();
 }
 
 void screen_request_frame(void)
 {
-    if (screen_get_mode() == SCREEN_MODE_RUNNING) {
+    if (app_state_get() == APP_STATE_RUNNING) {
         xEventGroupSetBits(screen_event_state, SCREEN_UPDATE_BIT);
     }
 }
 
 void screen_request_game_start(void)
 {
-    bool publish_start = false;
-
-    game_state_lock();
-
-    if (screen_mode == SCREEN_MODE_WAITING_FOR_START) {
-        /*
-         * START_PENDING suppresses repeated OK edges while screen task is
-         * waiting to run, making the transition idempotent.
-         */
-        screen_mode = SCREEN_MODE_START_PENDING;
-        publish_start = true;
-    }
-
-    game_state_unlock();
-
-    if (publish_start) {
+    if (app_state_transition(APP_STATE_WAITING_FOR_START,
+                             APP_STATE_START_PENDING)) {
         xEventGroupSetBits(screen_event_state, SCREEN_GAME_START_BIT);
     }
 }
 
 void screen_request_game_over(void)
 {
-    bool publish_game_over = false;
-
-    game_state_lock();
-
-    if (screen_mode == SCREEN_MODE_RUNNING) {
-        /*
-         * Change mode before publishing the event so all producers stop
-         * mutating state immediately, even if screen task runs a little later.
-         */
-        screen_mode = SCREEN_MODE_GAME_OVER_TRANSITION;
-        publish_game_over = true;
-    }
-
-    game_state_unlock();
-
-    if (publish_game_over) {
+    /*
+     * Change state before publishing so every object worker rejects stale
+     * updates even if the screen owner runs slightly later.
+     */
+    if (app_state_transition(APP_STATE_RUNNING,
+                             APP_STATE_GAME_OVER_TRANSITION)) {
         xEventGroupSetBits(screen_event_state, SCREEN_GAME_OVER_BIT);
     }
 }
 
 void screen_request_return_to_start(void)
 {
-    bool publish_return = false;
-
-    game_state_lock();
-
-    if (screen_mode == SCREEN_MODE_GAME_OVER) {
-        /*
-         * The pending state makes repeated button edges idempotent while the
-         * screen owner restores the next session.
-         */
-        screen_mode = SCREEN_MODE_RETURN_TO_START_PENDING;
-        publish_return = true;
-    }
-
-    game_state_unlock();
-
-    if (publish_return) {
+    if (app_state_transition(APP_STATE_GAME_OVER,
+                             APP_STATE_RETURN_TO_START_PENDING)) {
         xEventGroupSetBits(screen_event_state, SCREEN_RETURN_TO_START_BIT);
     }
 }
 
 void screen_request_saver_exit(void)
 {
-    if (screen_get_mode() == SCREEN_MODE_SCREENSAVER) {
+    if (app_state_get() == APP_STATE_SCREENSAVER) {
         xEventGroupSetBits(screen_event_state, SCREEN_SAVER_EXIT_BIT);
     }
 }
 
 void screen_request_saver_add_circle(void)
 {
-    if (screen_get_mode() == SCREEN_MODE_SCREENSAVER) {
+    if (app_state_get() == APP_STATE_SCREENSAVER) {
         xEventGroupSetBits(screen_event_state, SCREEN_SAVER_ADD_BIT);
     }
 }
 
 void screen_request_saver_remove_circle(void)
 {
-    if (screen_get_mode() == SCREEN_MODE_SCREENSAVER) {
+    if (app_state_get() == APP_STATE_SCREENSAVER) {
         xEventGroupSetBits(screen_event_state, SCREEN_SAVER_REMOVE_BIT);
     }
 }
 
-screen_mode_t screen_get_mode(void)
+void screen_request_saver_next_effect(void)
 {
-    screen_mode_t mode;
-
-    game_state_lock();
-    mode = screen_mode;
-    game_state_unlock();
-
-    return mode;
+    if (app_state_get() == APP_STATE_SCREENSAVER) {
+        xEventGroupSetBits(screen_event_state, SCREEN_SAVER_NEXT_BIT);
+    }
 }
 
-bool screen_gameplay_is_running_locked(void)
+void screen_request_saver_previous_effect(void)
+{
+    if (app_state_get() == APP_STATE_SCREENSAVER) {
+        xEventGroupSetBits(screen_event_state, SCREEN_SAVER_PREVIOUS_BIT);
+    }
+}
+
+void screen_request_pause(void)
+{
+    if (app_state_transition(APP_STATE_RUNNING, APP_STATE_PAUSED)) {
+        xEventGroupSetBits(screen_event_state, SCREEN_PAUSE_BIT);
+    }
+}
+
+void screen_request_resume(void)
+{
+    if (app_state_get() == APP_STATE_PAUSED) {
+        xEventGroupSetBits(screen_event_state, SCREEN_RESUME_BIT);
+    }
+}
+
+void screen_request_settings_enter(void)
+{
+    if (app_state_transition(APP_STATE_WAITING_FOR_START,
+                             APP_STATE_SETTINGS)) {
+        xEventGroupSetBits(screen_event_state, SCREEN_SETTINGS_ENTER_BIT);
+    }
+}
+
+void screen_request_settings_exit(void)
+{
+    if (app_state_get() == APP_STATE_SETTINGS) {
+        xEventGroupSetBits(screen_event_state, SCREEN_SETTINGS_EXIT_BIT);
+    }
+}
+
+void screen_request_settings_difficulty(void)
+{
+    if (app_state_get() == APP_STATE_SETTINGS) {
+        xEventGroupSetBits(screen_event_state,
+                           SCREEN_SETTINGS_DIFFICULTY_BIT);
+    }
+}
+
+void screen_request_settings_effect(void)
+{
+    if (app_state_get() == APP_STATE_SETTINGS) {
+        xEventGroupSetBits(screen_event_state, SCREEN_SETTINGS_EFFECT_BIT);
+    }
+}
+
+void screen_request_settings_sound(void)
+{
+    if (app_state_get() == APP_STATE_SETTINGS) {
+        xEventGroupSetBits(screen_event_state, SCREEN_SETTINGS_SOUND_BIT);
+    }
+}
+
+void screen_request_wake(void)
 {
     /*
-     * Deliberately do not take game_state_mutex here.  Every caller already
-     * holds it, so locking again would deadlock FreeRTOS's non-recursive mutex.
+     * Keep DISPLAY_SLEEP until the screen owner has physically enabled OLED.
+     * Additional queued input is therefore swallowed as wake intent instead of
+     * starting a hidden game while the panel is still off.
      */
-    return screen_mode == SCREEN_MODE_RUNNING;
+    if (app_state_get() == APP_STATE_DISPLAY_SLEEP) {
+        xEventGroupSetBits(screen_event_state, SCREEN_WAKE_BIT);
+    }
 }

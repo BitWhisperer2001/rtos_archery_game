@@ -55,7 +55,13 @@
 #define configTICK_RATE_HZ				( ( TickType_t ) 1000 )
 #define configMAX_PRIORITIES			( 5 )
 #define configMINIMAL_STACK_SIZE		( ( unsigned short ) 130 )
-#define configTOTAL_HEAP_SIZE			( ( size_t ) ( 36 * 1024 ) )
+/*
+ * StaticTask_t is 1176 bytes with configUSE_NEWLIB_REENTRANT enabled on this
+ * toolchain.  Twelve application/kernel TCBs plus their stacks cannot fit in
+ * the former 36 KiB heap.  Keep newlib reentrancy and provide measured headroom
+ * for the Idle/Timer tasks that FreeRTOS creates inside vTaskStartScheduler().
+ */
+#define configTOTAL_HEAP_SIZE			( ( size_t ) ( 48 * 1024 ) )
 #define configMAX_TASK_NAME_LEN			( 32 )
 #define configUSE_TRACE_FACILITY		1
 #define configUSE_16_BIT_TICKS			0

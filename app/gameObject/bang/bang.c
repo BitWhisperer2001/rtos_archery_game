@@ -3,10 +3,13 @@
 
 #include "bang.h"
 
+#include "app_state.h"
 #include "bitmap.h"
 #include "border.h"
 #include "buzzer_task.h"
+#include "difficulty_manager.h"
 #include "game_state.h"
+#include "game_stats.h"
 #include "meteoroid.h"
 #include "screen_task.h"
 
@@ -19,8 +22,6 @@
 TaskHandle_t task_update_bang_handle = NULL;
 SemaphoreHandle_t semphr_task_bang_update = NULL;
 game_bang_t game_bang[BANG_MAX_NUM];
-
-static uint8_t count_score = 0U;
 
 static void task_bang_update_handler(void *param)
 {
@@ -40,7 +41,7 @@ static void task_bang_update_handler(void *param)
          * A pending animation token from the old session is discarded under
          * the same mutex that protects score and explosion state.
          */
-        if (!screen_gameplay_is_running_locked()) {
+        if (!app_state_is_running_locked()) {
             game_state_unlock();
             continue;
         }
@@ -64,29 +65,14 @@ static void task_bang_update_handler(void *param)
                     game_border.game_score += GAME_SCORE_STEP;
                     meteor_destroyed = true;
 
-                    count_score++;
-                    if (count_score >= 10U) {
-                        count_score = 0U;
-
-                        /*
-                         * Saturating subtraction guarantees the game cadence
-                         * can never underflow into a multi-day timer period.
-                         */
-                        if (meteoroid_timer_period_ms >
-                            METEOROID_PERIOD_MIN_MS) {
-                            if (meteoroid_timer_period_ms >
-                                (METEOROID_PERIOD_MIN_MS +
-                                 METEOROID_PERIOD_STEP_MS)) {
-                                meteoroid_timer_period_ms -=
-                                    METEOROID_PERIOD_STEP_MS;
-                            } else {
-                                meteoroid_timer_period_ms =
-                                    METEOROID_PERIOD_MIN_MS;
-                            }
-
-                            period_changed = true;
-                            new_period_ms = meteoroid_timer_period_ms;
-                        }
+                    /*
+                     * Difficulty policy is centralized and saturating.  Bang
+                     * animation only reports a confirmed hit.
+                     */
+                    if (difficulty_manager_register_hit_locked(
+                            &new_period_ms)) {
+                        meteoroid_timer_period_ms = new_period_ms;
+                        period_changed = true;
                     }
                     break;
 
@@ -114,7 +100,8 @@ static void task_bang_update_handler(void *param)
         }
 
         if (meteor_destroyed) {
-            xEventGroupSetBits(buzzer_event_state, METEOROID_DESTROY);
+            game_stats_record_hit();
+            (void)buzzer_request_cue(AUDIO_CUE_METEOR_DESTROYED);
         }
 
         if (animation_changed) {
@@ -138,9 +125,6 @@ void bang_reset_for_new_game(void)
         game_bang[i].x = 0;
         game_bang[i].y = 0;
     }
-
-    /* Difficulty progression must always start at the same score boundary. */
-    count_score = 0U;
 
     game_state_unlock();
 }

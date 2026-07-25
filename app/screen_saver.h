@@ -28,6 +28,7 @@ typedef struct {
 typedef struct {
     screen_saver_circle_t circles[SCREEN_SAVER_MAX_CIRCLES];
     uint32_t random_state;
+    uint16_t frame_counter;
     uint8_t count;
 } screen_saver_t;
 

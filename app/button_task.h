@@ -12,6 +12,7 @@ extern "C" {
 #define BUTTON_TASK_STACK_WORDS    (384U)
 #define BUTTON_POLL_PERIOD_MS      (20U)
 #define BUTTON_DEBOUNCE_SAMPLES    (3U)
+#define BUTTON_LONG_PRESS_MS       (800U)
 
 extern TaskHandle_t task_button_handle;
 

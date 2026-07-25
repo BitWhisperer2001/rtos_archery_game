@@ -3,6 +3,7 @@
 
 #include "archery.h"
 
+#include "app_state.h"
 #include "arrow.h"
 #include "bitmap.h"
 #include "game_state.h"
@@ -34,7 +35,7 @@ static void archery_task_handler(void *param)
          * Game over can therefore never slip between a mode check and this
          * update, which is essential when a new session reuses the same task.
          */
-        if (!screen_gameplay_is_running_locked()) {
+        if (!app_state_is_running_locked()) {
             game_state_unlock();
             continue;
         }

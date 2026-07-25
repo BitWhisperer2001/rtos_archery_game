@@ -179,47 +179,66 @@ void sys_log_config(void)
  * partially programmed record is never accepted after reset.
  */
 #define SCORE_RECORD_MAGIC       (0x53434F52UL) /* ASCII "SCOR" */
-#define SCORE_RECORD_CRC_SEED    (0xA5A55A5AUL)
+#define SETTINGS_RECORD_MAGIC    (0x53455454UL) /* ASCII "SETT" */
+#define JOURNAL_RECORD_CRC_SEED  (0xA5A55A5AUL)
 
 typedef struct
 {
     uint32_t magic;
     uint32_t sequence;
-    uint32_t score;
+    uint32_t value;
     uint32_t crc;
-} score_record_t;
+} journal_record_t;
 
-/* Journal layout is a persistent ABI; catch accidental padding changes. */
-_Static_assert(sizeof(score_record_t) == 16U, "score_record_t Flash layout must remain 16 bytes");
+/*
+ * This is byte-for-byte compatible with the previous score_record_t.  Existing
+ * SCOR entries therefore remain readable after adding settings records.
+ */
+_Static_assert(sizeof(journal_record_t) == 16U,
+               "journal_record_t Flash layout must remain 16 bytes");
 
-static uint32_t score_record_crc(const score_record_t *record)
+typedef struct {
+    bool found;
+    uint32_t sequence;
+    uint32_t value;
+} journal_latest_t;
+
+typedef struct {
+    uintptr_t free_address;
+    journal_latest_t score;
+    journal_latest_t settings;
+} journal_scan_t;
+
+static uint32_t journal_record_crc(const journal_record_t *record)
 {
-    return record->magic ^ record->sequence ^ record->score ^ SCORE_RECORD_CRC_SEED;
+    return record->magic ^ record->sequence ^ record->value ^
+           JOURNAL_RECORD_CRC_SEED;
 }
 
-static bool score_record_is_erased(const volatile score_record_t *record)
+static bool journal_record_is_erased(const volatile journal_record_t *record)
 {
     return (record->magic == UINT32_MAX) &&
            (record->sequence == UINT32_MAX) &&
-           (record->score == UINT32_MAX) &&
+           (record->value == UINT32_MAX) &&
            (record->crc == UINT32_MAX);
 }
 
-static bool score_record_is_valid(const volatile score_record_t *record)
+static bool journal_record_is_valid(const volatile journal_record_t *record)
 {
-    score_record_t snapshot;
+    journal_record_t snapshot;
 
     /* Read once into a normal object so validation uses a coherent snapshot. */
     snapshot.magic = record->magic;
     snapshot.sequence = record->sequence;
-    snapshot.score = record->score;
+    snapshot.value = record->value;
     snapshot.crc = record->crc;
 
-    return (snapshot.magic == SCORE_RECORD_MAGIC) &&
-           (snapshot.crc == score_record_crc(&snapshot));
+    return ((snapshot.magic == SCORE_RECORD_MAGIC) ||
+            (snapshot.magic == SETTINGS_RECORD_MAGIC)) &&
+           (snapshot.crc == journal_record_crc(&snapshot));
 }
 
-static bool score_sequence_is_newer(uint32_t candidate, uint32_t current)
+static bool journal_sequence_is_newer(uint32_t candidate, uint32_t current)
 {
     /*
      * Signed modular distance keeps ordering correct when the 32-bit journal
@@ -233,112 +252,162 @@ static bool score_address_is_valid(uint32_t address)
     return address == (uint32_t)(uintptr_t)&__nvm_start__;
 }
 
-uint32_t sys_read_score_in_flash(uint32_t add)
+static void journal_update_latest(journal_latest_t *latest,
+                                  const volatile journal_record_t *record)
 {
-    const uintptr_t start = (uintptr_t)&__nvm_start__;
-    const uintptr_t end = (uintptr_t)&__nvm_end__;
-    const volatile score_record_t *record;
-    uint32_t latest_score = 0U;
-    uint32_t latest_sequence = 0U;
-    bool found = false;
-
-    if (!score_address_is_valid(add)) {
-        return 0U;
+    if ((!latest->found) ||
+        journal_sequence_is_newer(record->sequence, latest->sequence)) {
+        latest->found = true;
+        latest->sequence = record->sequence;
+        latest->value = record->value;
     }
-
-    for (uintptr_t address = start;
-         (address + sizeof(score_record_t)) <= end;
-         address += sizeof(score_record_t)) {
-        record = (const volatile score_record_t *)address;
-
-        if (score_record_is_erased(record)) {
-            break;
-        }
-
-        if (score_record_is_valid(record) &&
-            ((!found) ||
-             score_sequence_is_newer(record->sequence, latest_sequence))) {
-            latest_sequence = record->sequence;
-            latest_score = record->score;
-            found = true;
-        }
-    }
-
-    return latest_score;
 }
 
-bool sys_save_score_into_flash(uint32_t add, uint32_t data)
+static journal_scan_t journal_scan(void)
 {
+    journal_scan_t scan = {
+        .free_address = (uintptr_t)&__nvm_end__
+    };
     const uintptr_t start = (uintptr_t)&__nvm_start__;
     const uintptr_t end = (uintptr_t)&__nvm_end__;
-    const volatile score_record_t *record;
-    uintptr_t target = end;
-    uint32_t latest_sequence = 0U;
-    bool found_previous = false;
-    FLASH_Status status = FLASH_COMPLETE;
-    score_record_t next;
+    const volatile journal_record_t *record;
 
-    if (!score_address_is_valid(add)) {
-        return false;
-    }
-
-    /* Locate both the newest valid record and the first unused journal slot. */
     for (uintptr_t address = start;
-         (address + sizeof(score_record_t)) <= end;
-         address += sizeof(score_record_t)) {
-        record = (const volatile score_record_t *)address;
+         (address + sizeof(journal_record_t)) <= end;
+         address += sizeof(journal_record_t)) {
+        record = (const volatile journal_record_t *)address;
 
-        if (score_record_is_erased(record)) {
-            target = address;
+        if (journal_record_is_erased(record)) {
+            scan.free_address = address;
             break;
         }
 
-        if (score_record_is_valid(record) &&
-            ((!found_previous) ||
-             score_sequence_is_newer(record->sequence, latest_sequence))) {
-            latest_sequence = record->sequence;
-            found_previous = true;
+        if (!journal_record_is_valid(record)) {
+            continue;
+        }
+
+        if (record->magic == SCORE_RECORD_MAGIC) {
+            journal_update_latest(&scan.score, record);
+        } else if (record->magic == SETTINGS_RECORD_MAGIC) {
+            journal_update_latest(&scan.settings, record);
         }
     }
+
+    return scan;
+}
+
+static FLASH_Status journal_program_record(uintptr_t address,
+                                           uint32_t magic,
+                                           uint32_t sequence,
+                                           uint32_t value)
+{
+    FLASH_Status status = FLASH_COMPLETE;
+    journal_record_t next = {
+        .magic = magic,
+        .sequence = sequence,
+        .value = value
+    };
+
+    next.crc = journal_record_crc(&next);
+
+    status = FLASH_ProgramWord((uint32_t)(address + 0U), next.magic);
+    if (status == FLASH_COMPLETE) {
+        status = FLASH_ProgramWord((uint32_t)(address + 4U), next.sequence);
+    }
+    if (status == FLASH_COMPLETE) {
+        status = FLASH_ProgramWord((uint32_t)(address + 8U), next.value);
+    }
+    if (status == FLASH_COMPLETE) {
+        /* CRC remains the final power-loss-safe commit marker. */
+        status = FLASH_ProgramWord((uint32_t)(address + 12U), next.crc);
+    }
+
+    return status;
+}
+
+static bool journal_save(uint32_t magic, uint32_t value)
+{
+    const uintptr_t start = (uintptr_t)&__nvm_start__;
+    const uintptr_t end = (uintptr_t)&__nvm_end__;
+    journal_scan_t scan = journal_scan();
+    journal_latest_t *target_latest =
+        (magic == SCORE_RECORD_MAGIC) ? &scan.score : &scan.settings;
+    journal_latest_t *other_latest =
+        (magic == SCORE_RECORD_MAGIC) ? &scan.settings : &scan.score;
+    uint32_t other_magic =
+        (magic == SCORE_RECORD_MAGIC) ? SETTINGS_RECORD_MAGIC :
+                                        SCORE_RECORD_MAGIC;
+    uint32_t next_sequence =
+        target_latest->found ? (target_latest->sequence + 1U) : 0U;
+    uintptr_t target = scan.free_address;
+    FLASH_Status status;
 
     FLASH_Unlock();
     FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
                     FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
 
-    /* Erase only after all journal slots have been consumed. */
     if (target == end) {
+        /*
+         * Sector compaction keeps the newest record of the other type before
+         * appending the new value.  Score and settings therefore survive one
+         * another even though STM32F411 erases Flash only by whole sector.
+         */
         status = FLASH_EraseSector(FLASH_Sector_7, VoltageRange_3);
         target = start;
+
+        if ((status == FLASH_COMPLETE) && other_latest->found) {
+            status = journal_program_record(target, other_magic,
+                                            other_latest->sequence,
+                                            other_latest->value);
+            target += sizeof(journal_record_t);
+        }
+    } else {
+        status = FLASH_COMPLETE;
     }
 
-    next.magic = SCORE_RECORD_MAGIC;
-    next.sequence = found_previous ? (latest_sequence + 1U) : 0U;
-    next.score = data;
-    next.crc = score_record_crc(&next);
-
     if (status == FLASH_COMPLETE) {
-        status = FLASH_ProgramWord((uint32_t)(target + 0U), next.magic);
+        status = journal_program_record(target, magic, next_sequence, value);
     }
-    if (status == FLASH_COMPLETE) {
-        status = FLASH_ProgramWord((uint32_t)(target + 4U), next.sequence);
-    }
-    if (status == FLASH_COMPLETE) {
-        status = FLASH_ProgramWord((uint32_t)(target + 8U), next.score);
-    }
-    if (status == FLASH_COMPLETE) {
-        /* CRC is the commit marker and must always be programmed last. */
-        status = FLASH_ProgramWord((uint32_t)(target + 12U), next.crc);
-    }
-
-    FLASH_Lock();
 
     /*
      * Read back the committed record. A brownout or marginal Flash write must
      * be reported to the UI instead of being accepted solely from SPL status.
      */
-    record = (const volatile score_record_t *)target;
-    return (status == FLASH_COMPLETE) &&
-           score_record_is_valid(record) &&
-           (record->score == data);
+    const volatile journal_record_t *record =
+        (const volatile journal_record_t *)target;
+    bool valid = (status == FLASH_COMPLETE) &&
+                 journal_record_is_valid(record) &&
+                 (record->magic == magic) &&
+                 (record->value == value);
+
+    FLASH_Lock();
+    return valid;
+}
+
+uint32_t sys_read_score_in_flash(uint32_t add)
+{
+    if (!score_address_is_valid(add)) {
+        return 0U;
+    }
+
+    journal_scan_t scan = journal_scan();
+    return scan.score.found ? scan.score.value : 0U;
+}
+
+bool sys_save_score_into_flash(uint32_t add, uint32_t data)
+{
+    return score_address_is_valid(add) &&
+           journal_save(SCORE_RECORD_MAGIC, data);
+}
+
+uint32_t sys_read_settings_in_flash(uint32_t default_value)
+{
+    journal_scan_t scan = journal_scan();
+    return scan.settings.found ? scan.settings.value : default_value;
+}
+
+bool sys_save_settings_into_flash(uint32_t data)
+{
+    return journal_save(SETTINGS_RECORD_MAGIC, data);
 }
 

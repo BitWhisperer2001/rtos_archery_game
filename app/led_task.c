@@ -22,9 +22,11 @@ void vApplicationIdleHook(void)
         system_fault_mark_boot_success();
         is_boot_marked_successful = true;
     }
-    led_toggle(LED_ONBOARD);
-
-    /* Sleep until the next interrupt instead of burning power in the idle loop. */
+    /*
+     * Do not toggle GPIO on every idle iteration: that needlessly prevents a
+     * quiet low-power state and can generate measurable supply noise.  The
+     * dedicated life timer remains the visible health indicator.
+     */
     __WFI();
 }
 

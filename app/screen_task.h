@@ -8,6 +8,7 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "app_state.h"
 #include "FreeRTOS.h"
 #include "event_groups.h"
 #include "task.h"
@@ -22,24 +23,16 @@ extern "C" {
 #define SCREEN_SAVER_ADD_BIT         (1U << 4)
 #define SCREEN_SAVER_REMOVE_BIT      (1U << 5)
 #define SCREEN_RETURN_TO_START_BIT   (1U << 6)
-
-/*
- * The screen mode is also the application lifecycle state.  Keeping it here
- * makes the OLED owner responsible for visible state transitions.
- */
-typedef enum {
-    SCREEN_MODE_WAITING_FOR_START = 0,
-    SCREEN_MODE_SCREENSAVER,
-    SCREEN_MODE_START_PENDING,
-    SCREEN_MODE_RUNNING,
-    /*
-     * Keep the transition distinct from the interactive game-over screen.
-     * Input is ignored while the score is saved and the end sound is playing.
-     */
-    SCREEN_MODE_GAME_OVER_TRANSITION,
-    SCREEN_MODE_GAME_OVER,
-    SCREEN_MODE_RETURN_TO_START_PENDING
-} screen_mode_t;
+#define SCREEN_PAUSE_BIT             (1U << 7)
+#define SCREEN_RESUME_BIT            (1U << 8)
+#define SCREEN_SAVER_NEXT_BIT        (1U << 9)
+#define SCREEN_SAVER_PREVIOUS_BIT    (1U << 10)
+#define SCREEN_SETTINGS_ENTER_BIT    (1U << 11)
+#define SCREEN_SETTINGS_EXIT_BIT     (1U << 12)
+#define SCREEN_SETTINGS_DIFFICULTY_BIT (1U << 13)
+#define SCREEN_SETTINGS_EFFECT_BIT   (1U << 14)
+#define SCREEN_SETTINGS_SOUND_BIT    (1U << 15)
+#define SCREEN_WAKE_BIT              (1U << 16)
 
 extern EventGroupHandle_t screen_event_state;
 extern TaskHandle_t task_update_screen_handle;
@@ -59,13 +52,16 @@ void screen_request_return_to_start(void);
 void screen_request_saver_exit(void);
 void screen_request_saver_add_circle(void);
 void screen_request_saver_remove_circle(void);
-screen_mode_t screen_get_mode(void);
-
-/*
- * The caller must already hold game_state_mutex.  Workers use this second
- * check immediately before mutation to close the check-then-lock race.
- */
-bool screen_gameplay_is_running_locked(void);
+void screen_request_saver_next_effect(void);
+void screen_request_saver_previous_effect(void);
+void screen_request_pause(void);
+void screen_request_resume(void);
+void screen_request_settings_enter(void);
+void screen_request_settings_exit(void);
+void screen_request_settings_difficulty(void);
+void screen_request_settings_effect(void);
+void screen_request_settings_sound(void);
+void screen_request_wake(void);
 
 #ifdef __cplusplus
 }

@@ -280,6 +280,9 @@ void SSD1306_Stopscroll(void);
 // inverts the display i = 1->inverted, i = 0->normal
 void SSD1306_InvertDisplay (int i);
 
+/* Power commands keep framebuffer RAM intact while disabling/enabling OLED. */
+void SSD1306_ON(void);
+void SSD1306_OFF(void);
 
 // clear the display
 void SSD1306_Clear (void);

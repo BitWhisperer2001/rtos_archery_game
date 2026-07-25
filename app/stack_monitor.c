@@ -6,7 +6,7 @@
 #include "system_log.h"
 #include "stack_monitor.h"
 
-#define STACK_MONITOR_MAX_TASKS       12U
+#define STACK_MONITOR_MAX_TASKS       14U
 #define STACK_MONITOR_PERIOD_MS       5000U
 #define STACK_MONITOR_STACK_WORDS     256U
 
@@ -31,6 +31,9 @@ static void stack_monitor_task(void *parameter)
         if (task_count >= STACK_MONITOR_MAX_TASKS){
             DBG_LOG("WARNING: task list truncated");
         }
+        DBG_LOG("Heap: free=%lu min-ever=%lu bytes",
+                (unsigned long)xPortGetFreeHeapSize(),
+                (unsigned long)xPortGetMinimumEverFreeHeapSize());
         vTaskDelay(pdMS_TO_TICKS(STACK_MONITOR_PERIOD_MS));
     }
 }

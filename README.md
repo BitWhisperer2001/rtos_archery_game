@@ -1,4 +1,4 @@
-# Archery Game — STM32F411RE / FreeRTOS
+# Archery Game - STM32F411RE / FreeRTOS
 
 An embedded archery game created to study ARM Cortex-M4 startup, exception
 handling, linker scripts, peripheral drivers, and real-time design. The project
@@ -9,11 +9,14 @@ and communicates through queues, semaphores, and event groups.
 
 - Bare-metal Cortex-M startup, vector table, C runtime initialization, and FPU
 - A memory-safe linker layout with a dedicated persistent Flash partition
-- FreeRTOS tasks, software timers, queues, semaphores, and event groups
+- FreeRTOS tasks, software timers, priority audio queues, task notifications,
+  input queues, semaphores, and event groups
 - SSD1306 rendering over timeout-bounded I2C with bus recovery
 - UART logging over DMA with concurrency and DMA-error handling
 - Retained Cortex-M fault records, stack-overflow and allocation hooks
-- Wear-reduced, CRC-protected high-score journaling in Flash sector 7
+- Wear-reduced, CRC-protected score/settings journaling in Flash sector 7
+- Versioned persistent difficulty, sound and screensaver preferences
+- Explicit application lifecycle with pause, display sleep and soft replay
 - Separate reproducible Debug and Release firmware outputs
 
 ## Runtime architecture
@@ -27,10 +30,11 @@ Reset_Handler
   -> object tasks/timers and IPC creation
   -> FreeRTOS scheduler
 
-Button task --OK--> lifecycle event -> start gameplay timers
+Button sampler -> short/long press queue -> input router -> lifecycle intent
 Game timer -> archery/arrow workers -> collision/bang state machine
 Meteor timer -> task notification -> meteoroid worker
 Object workers -> coherent game-state snapshot -> screen-owner task -> OLED
+Audio producers -> normal/high-priority queues -> TIM3 audio-owner task
 ```
 
 Only the screen-owner task accesses the SSD1306 framebuffer and I2C peripheral.
@@ -40,10 +44,12 @@ releases the state mutex before drawing or performing the slower I2C transfer.
 Software-timer callbacks only publish notifications/events and never render,
 write Flash, or block on application mutexes.
 
-At boot the game starts on the splash screen. Gameplay timers and the start
-sound are activated only after a debounced press of the OK button. After ten
-seconds without input, the screen owner enters a 25 FPS screensaver whose Q8.8
-fixed-point circles reflect from all four display edges.
+At boot the game starts on the splash screen and plays the start melody after
+the OLED transfer succeeds. Gameplay timers activate only after a debounced
+short OK press. The configured idle timeout enters a 25 FPS screensaver engine
+with Bubbles, Starfield and Waves effects. Effects auto-rotate every 15 seconds,
+reduce to 10 FPS after one minute, and eventually turn the OLED off while the
+idle hook keeps the Cortex-M in `WFI`.
 
 ## Hardware
 
@@ -63,12 +69,15 @@ Target: **NUCLEO-F411RE**, STM32F411RETx, 512 KiB Flash, 128 KiB SRAM.
 ### Controls
 
 - Startup screen: the start melody plays as soon as this prompt is displayed.
-  Press **OK** once to start; gameplay timers remain stopped while waiting.
-- After 10 seconds on the startup screen, screensaver mode begins with one
-  radius-8 circle at screen center. **Up** adds a random circle (maximum 10),
-  **Down** removes the newest circle first (minimum 1), and **OK** returns to
-  the startup screen.
-- During gameplay: **Up/Down** moves the archer and **OK** fires an arrow.
+  Short-press **OK** to start. Hold **OK** for 800 ms to enter Settings.
+- Settings: **Up** cycles difficulty, **Down** selects the initial screensaver
+  effect, hold **Up** to toggle sound, and **OK** saves to the CRC journal.
+- Screensaver: short **Up/Down** changes effect density, hold **Up/Down** to
+  select the next/previous effect, and **OK** returns to the startup screen.
+- During gameplay: **Up/Down** moves the archer, short **OK** fires, and holding
+  **OK** pauses. Press **OK** again to resume.
+- After prolonged saver inactivity the OLED turns off. The first button release
+  wakes to the startup screen without performing a hidden action.
 - Game-over screen: press **OK** to perform a software session reset and return
   to the startup screen. The MCU, RTOS tasks and peripherals remain running;
   only per-game objects, pending pipeline signals and difficulty are reset.
@@ -115,9 +124,10 @@ make clean
 make flash BUILD_TYPE=Release
 ```
 
-`make flash` programs only the application image. High-score data is kept in
-sector 7 (`0x08060000`–`0x0807FFFF`). To intentionally erase application and
-persistent data:
+`make flash` programs only the application image. Score and versioned settings
+records share the append-only journal in sector 7
+(`0x08060000`-`0x0807FFFF`). Legacy `SCOR` records remain compatible. To
+intentionally erase application and persistent data:
 
 ```bash
 make full_flash_erase
@@ -144,12 +154,13 @@ with margin for worst-case interrupt nesting and library calls.
 
 ## Memory contract
 
-- `0x08000000`–`0x0805FFFF`: application image (384 KiB)
-- `0x08060000`–`0x0807FFFF`: score journal (128 KiB, Flash sector 7)
-- `0x20000000`–`0x2001FFFF`: SRAM (128 KiB)
+- `0x08000000`-`0x0805FFFF`: application image (384 KiB)
+- `0x08060000`-`0x0807FFFF`: score/settings journal (128 KiB, Flash sector 7)
+- `0x20000000`-`0x2001FFFF`: SRAM (128 KiB)
 - Main stack reservation: 4 KiB
-- FreeRTOS heap: 36 KiB
+- FreeRTOS heap: 48 KiB. This includes measured headroom for newlib-enabled
+  task control blocks and the Idle/Timer tasks created at scheduler startup.
 
 Link-time assertions reject application/NVM overlap and insufficient SRAM. Do not
 change the Flash partition without updating both the linker script and the
-sector number used by the score journal.
+sector number used by the persistent journal.

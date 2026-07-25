@@ -25,12 +25,20 @@ MAP        := $(BUILD_DIR)/$(TARGET).map
 LST        := $(BUILD_DIR)/$(TARGET).lst
 HOST_TEST  := build/host/ring_buffer_test
 HOST_SAVER_TEST := build/host/screen_saver_test
+HOST_SAVER_ENGINE_TEST := build/host/saver_engine_test
+HOST_DIFFICULTY_TEST := build/host/difficulty_manager_test
 
 SOURCES := \
 	app/app.c \
+	app/app_state.c \
+	app/app_settings.c \
 	app/game_state.c \
 	app/game_session.c \
+	app/game_stats.c \
+	app/difficulty_manager.c \
 	app/screen_saver.c \
+	app/saver_engine.c \
+	app/input_task.c \
 	app/button_task.c \
 	app/screen_task.c \
 	app/buzzer_task.c \
@@ -202,9 +210,24 @@ $(HOST_SAVER_TEST): tests/test_screen_saver.c app/screen_saver.c app/screen_save
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -Iapp \
 		tests/test_screen_saver.c app/screen_saver.c -o $@
 
-test: $(HOST_TEST) $(HOST_SAVER_TEST)
+$(HOST_SAVER_ENGINE_TEST): tests/test_saver_engine.c app/saver_engine.c \
+		app/saver_engine.h app/screen_saver.c app/screen_saver.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -Iapp \
+		tests/test_saver_engine.c app/saver_engine.c app/screen_saver.c -o $@
+
+$(HOST_DIFFICULTY_TEST): tests/test_difficulty_manager.c \
+		app/difficulty_manager.c app/difficulty_manager.h app/app_settings.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -Iapp \
+		tests/test_difficulty_manager.c app/difficulty_manager.c -o $@
+
+test: $(HOST_TEST) $(HOST_SAVER_TEST) $(HOST_SAVER_ENGINE_TEST) \
+		$(HOST_DIFFICULTY_TEST)
 	$(HOST_TEST)
 	$(HOST_SAVER_TEST)
+	$(HOST_SAVER_ENGINE_TEST)
+	$(HOST_DIFFICULTY_TEST)
 
 flash: all
 	@echo "Flashing $(ELF) via OpenOCD..."

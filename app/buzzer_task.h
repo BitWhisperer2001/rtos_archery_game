@@ -3,26 +3,26 @@
 
 #ifdef __cplusplus
 extern "C" {
-#endif // __cplusplus
+#endif
 
-#include <stdint.h>
 #include <stdbool.h>
-#include "FreeRTOS.h"
-#include "event_groups.h"
 
-#define TASK_BUZZER_PRIORITY 2
+#define TASK_BUZZER_PRIORITY       (2U)
 
-#define ARROW_SHOT_BIT              (1U << 0)
-#define ARCHERY_NO_ARROW_BIT        (1U << 1)
-#define METEOROID_DESTROY           (1U << 2)
-#define MUSIC_BACKGROUND            (1U << 3)
-#define GAME_OVER_SOUND_BIT         (1U << 4)
-#define GAME_START_SOUND_BIT        (1U << 5)
+typedef enum {
+    AUDIO_CUE_ARROW_SHOT = 0,
+    AUDIO_CUE_NO_ARROW,
+    AUDIO_CUE_METEOR_DESTROYED,
+    AUDIO_CUE_GAME_OVER,
+    AUDIO_CUE_GAME_START
+} audio_cue_t;
 
-extern EventGroupHandle_t buzzer_event_state;
-extern void buzzer_task_create(void);
+void buzzer_task_create(void);
+bool buzzer_request_cue(audio_cue_t cue);
+void buzzer_flush_gameplay_cues(void);
 
 #ifdef __cplusplus
 }
-#endif // __cplusplus
-#endif // BUZZER_TASK_H
+#endif
+
+#endif /* BUZZER_TASK_H */

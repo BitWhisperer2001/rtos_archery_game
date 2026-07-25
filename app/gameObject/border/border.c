@@ -2,6 +2,7 @@
 
 #include "border.h"
 
+#include "app_state.h"
 #include "arrow.h"
 #include "bitmap.h"
 #include "game_state.h"
@@ -47,7 +48,7 @@ static void task_update_border_handler(void *param)
          * Checking under the mutation mutex prevents an old semaphore token
          * from modifying the freshly reset score or ammunition display.
          */
-        if (!screen_gameplay_is_running_locked()) {
+        if (!app_state_is_running_locked()) {
             game_state_unlock();
             continue;
         }

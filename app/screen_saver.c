@@ -7,6 +7,8 @@
 #define SCREEN_SAVER_Q8_ONE               (1L << SCREEN_SAVER_Q8_SHIFT)
 #define SCREEN_SAVER_VELOCITY_MIN_Q8      (96)
 #define SCREEN_SAVER_VELOCITY_MAX_Q8      (192)
+#define SCREEN_SAVER_CURRENT_PERIOD        (32U)
+#define SCREEN_SAVER_CURRENT_DELTA_Q8      (8)
 #define SCREEN_SAVER_DEFAULT_SEED         (0x6D2B79F5UL)
 
 #define SCREEN_SAVER_X_MIN_Q8 \
@@ -84,6 +86,85 @@ static void screen_saver_reflect_axis(int32_t *position,
         *position = maximum - (*position - maximum);
         if (*velocity > 0) {
             *velocity = (int16_t)-(*velocity);
+        }
+    }
+}
+
+static int16_t screen_saver_clamp_velocity(int16_t velocity)
+{
+    if (velocity > SCREEN_SAVER_VELOCITY_MAX_Q8) {
+        return SCREEN_SAVER_VELOCITY_MAX_Q8;
+    }
+    if (velocity < -SCREEN_SAVER_VELOCITY_MAX_Q8) {
+        return -SCREEN_SAVER_VELOCITY_MAX_Q8;
+    }
+    if ((velocity >= 0) && (velocity < SCREEN_SAVER_VELOCITY_MIN_Q8)) {
+        return SCREEN_SAVER_VELOCITY_MIN_Q8;
+    }
+    if ((velocity < 0) && (velocity > -SCREEN_SAVER_VELOCITY_MIN_Q8)) {
+        return -SCREEN_SAVER_VELOCITY_MIN_Q8;
+    }
+    return velocity;
+}
+
+static void screen_saver_apply_current(screen_saver_t *saver)
+{
+    int16_t current_x =
+        (int16_t)screen_saver_random_range(
+            saver, -SCREEN_SAVER_CURRENT_DELTA_Q8,
+            SCREEN_SAVER_CURRENT_DELTA_Q8);
+    int16_t current_y =
+        (int16_t)screen_saver_random_range(
+            saver, -SCREEN_SAVER_CURRENT_DELTA_Q8,
+            SCREEN_SAVER_CURRENT_DELTA_Q8);
+
+    /*
+     * One tiny shared perturbation every 1.28 seconds resembles a slow water
+     * current without introducing per-frame jitter or floating-point math.
+     */
+    for (uint8_t i = 0U; i < saver->count; i++) {
+        saver->circles[i].velocity_x_q8 =
+            screen_saver_clamp_velocity(
+                (int16_t)(saver->circles[i].velocity_x_q8 + current_x));
+        saver->circles[i].velocity_y_q8 =
+            screen_saver_clamp_velocity(
+                (int16_t)(saver->circles[i].velocity_y_q8 + current_y));
+    }
+}
+
+static void screen_saver_resolve_collisions(screen_saver_t *saver)
+{
+    const int32_t diameter_q8 =
+        (2L * SCREEN_SAVER_CIRCLE_RADIUS * SCREEN_SAVER_Q8_ONE);
+    const int32_t collision_distance_squared =
+        diameter_q8 * diameter_q8;
+
+    for (uint8_t first = 0U; first < saver->count; first++) {
+        for (uint8_t second = (uint8_t)(first + 1U);
+             second < saver->count;
+             second++) {
+            screen_saver_circle_t *a = &saver->circles[first];
+            screen_saver_circle_t *b = &saver->circles[second];
+            int32_t dx = b->x_q8 - a->x_q8;
+            int32_t dy = b->y_q8 - a->y_q8;
+            int32_t distance_squared = (dx * dx) + (dy * dy);
+            int32_t relative_dot =
+                ((int32_t)(b->velocity_x_q8 - a->velocity_x_q8) * dx) +
+                ((int32_t)(b->velocity_y_q8 - a->velocity_y_q8) * dy);
+
+            if ((distance_squared <= collision_distance_squared) &&
+                (relative_dot < 0)) {
+                /*
+                 * Equal-mass circles exchange velocity vectors.  The approach
+                 * test prevents repeated swapping while they move apart.
+                 */
+                int16_t velocity_x = a->velocity_x_q8;
+                int16_t velocity_y = a->velocity_y_q8;
+                a->velocity_x_q8 = b->velocity_x_q8;
+                a->velocity_y_q8 = b->velocity_y_q8;
+                b->velocity_x_q8 = velocity_x;
+                b->velocity_y_q8 = velocity_y;
+            }
         }
     }
 }
@@ -169,6 +250,12 @@ void screen_saver_step(screen_saver_t *saver)
                                   &circle->velocity_y_q8,
                                   SCREEN_SAVER_Y_MIN_Q8,
                                   SCREEN_SAVER_Y_MAX_Q8);
+    }
+
+    screen_saver_resolve_collisions(saver);
+    saver->frame_counter++;
+    if ((saver->frame_counter % SCREEN_SAVER_CURRENT_PERIOD) == 0U) {
+        screen_saver_apply_current(saver);
     }
 }
 

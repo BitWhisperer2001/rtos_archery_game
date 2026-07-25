@@ -35,6 +35,13 @@ extern void sys_log_config(void);
 extern bool sys_save_score_into_flash(uint32_t add, uint32_t data);
 extern uint32_t sys_read_score_in_flash(uint32_t add);
 
+/*
+ * Settings share the append-only NVM journal with score records.  The packed
+ * payload is versioned by the application and remains power-loss detectable.
+ */
+bool sys_save_settings_into_flash(uint32_t data);
+uint32_t sys_read_settings_in_flash(uint32_t default_value);
+
 #ifdef __cplusplus
 }
 #endif   // __cplusplus

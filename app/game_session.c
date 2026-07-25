@@ -2,13 +2,16 @@
 
 #include "game_session.h"
 
+#include "app_settings.h"
+#include "app_state.h"
 #include "archery.h"
 #include "arrow.h"
 #include "bang.h"
 #include "border.h"
 #include "buzzer_task.h"
+#include "difficulty_manager.h"
+#include "game_stats.h"
 #include "meteoroid.h"
-#include "screen_task.h"
 
 #include "FreeRTOS.h"
 #include "event_groups.h"
@@ -28,16 +31,14 @@ static void game_session_drain_binary_semaphore(SemaphoreHandle_t semaphore)
 
 void game_session_reset(void)
 {
-    configASSERT(screen_get_mode() != SCREEN_MODE_RUNNING);
+    configASSERT(app_state_get() != APP_STATE_RUNNING);
 
     /*
      * Clear old pipeline commands before restoring object state.  The periodic
      * timers are already stopped and workers reject non-RUNNING sessions.
      */
     (void)xEventGroupClearBits(archery_event_state, ALL_EVENT);
-    (void)xEventGroupClearBits(
-        buzzer_event_state,
-        ARROW_SHOT_BIT | ARCHERY_NO_ARROW_BIT | METEOROID_DESTROY);
+    buzzer_flush_gameplay_cues();
     game_session_drain_binary_semaphore(semphr_task_arrow_update);
     game_session_drain_binary_semaphore(semphr_task_bang_update);
     game_session_drain_binary_semaphore(semphr_task_update_border);
@@ -53,6 +54,10 @@ void game_session_reset(void)
      * Reset data in dependency order: queue ownership first, then consumers.
      * Tasks, queues, semaphores and timers remain allocated for system lifetime.
      */
+    app_settings_t settings = app_settings_get();
+    difficulty_manager_reset(settings.difficulty);
+    game_stats_reset();
+
     arrow_reset_for_new_game();
     archery_reset_for_new_game();
     border_reset_for_new_game();
