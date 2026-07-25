@@ -35,6 +35,7 @@ extern SemaphoreHandle_t semphr_task_bang_update;
 extern game_bang_t game_bang[BANG_MAX_NUM];
 
 extern void bang_task_create(void);
+void bang_reset_for_new_game(void);
 
 #ifdef __cplusplus
 }

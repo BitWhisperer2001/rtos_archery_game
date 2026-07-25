@@ -1,4 +1,17 @@
-build
+# Generated firmware and dependency artifacts live only under this directory.
+build/
+
+# Local tool outputs are reproducible and should not enter source control.
 *.o
 *.elf
 *.map
+*.bin
+*.hex
+*.lst
+*.d
+*.su
+compile_commands.json
+
+# These notes are local study logs rather than project inputs.
+knowledge_game embed.txt
+list_fixed_bug.txt

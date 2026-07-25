@@ -6,18 +6,27 @@
 
 #ifdef __cplusplus
 extern "C" {
-#endif  // _cplusplus
+#endif
 
-#include "ssd1306.h"
+#define SCREEN_ADDRESS            0x78U
+#define SCREEN_I2C_TIMEOUT_MS     10U
 
-#define SCREEN_ADDREES      (0x78)
+typedef enum {
+    SCREEN_STATUS_OK = 0,
+    SCREEN_STATUS_INVALID_ARGUMENT,
+    SCREEN_STATUS_TIMEOUT,
+    SCREEN_STATUS_NACK,
+    SCREEN_STATUS_BUS_ERROR,
+    SCREEN_STATUS_ARBITRATION_LOST,
+    SCREEN_STATUS_OVERRUN,
+    SCREEN_STATUS_RECOVERY_FAILED
+} screen_status_t;
 
-// extern volatile bool IsDMAScreenBusy;
-extern void screen_init(void);
-extern void screen_data_write(uint8_t address, uint8_t *data, uint16_t len);
+void screen_init(void);
 
-#ifdef _cplusplus
+screen_status_t screen_data_write(uint8_t address, const uint8_t *data, uint16_t length);
+
+#ifdef __cplusplus
 }
-#endif  // _cplusplus
-#endif  // SCREEN_H
-
+#endif
+#endif

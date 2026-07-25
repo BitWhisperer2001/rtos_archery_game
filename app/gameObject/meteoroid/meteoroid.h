@@ -9,6 +9,7 @@ extern "C"{
 #include <stdint.h>
 #include <stdbool.h>
 #include "FreeRTOS.h"
+#include "task.h"
 #include "timers.h"
 
 #define METEOROID_Y_START       (5)
@@ -19,6 +20,9 @@ extern "C"{
 #define METEOROID_HEIGH         (10)
 #define METEROID_MAX_NUM        (5)
 #define METEOROID_RUN_STEP      (2)
+#define METEOROID_PERIOD_INITIAL_MS  120U
+#define METEOROID_PERIOD_MIN_MS       30U
+#define METEOROID_PERIOD_STEP_MS      15U
 
 typedef struct {
     bool visible;
@@ -28,12 +32,13 @@ typedef struct {
     uint8_t state;
 }game_meteoroid_t;
 
-extern bool isGameOver;
-extern volatile TimerHandle_t meteoroid_timer;
-extern volatile game_meteoroid_t game_meteoroid[METEROID_MAX_NUM];
-extern uint8_t meteoroid_timer_period;
+extern TimerHandle_t meteoroid_timer;
+extern TaskHandle_t task_meteoroid_update_handle;
+extern game_meteoroid_t game_meteoroid[METEROID_MAX_NUM];
+extern uint32_t meteoroid_timer_period_ms;
 
 extern void meteoroid_task_create(void);
+void meteoroid_reset_for_new_game(void);
 
 
 #ifdef __cplusplus

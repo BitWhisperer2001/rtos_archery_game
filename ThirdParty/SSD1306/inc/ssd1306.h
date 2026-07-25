@@ -25,7 +25,7 @@
 
 /* C++ detection */
 #ifdef __cplusplus
-extern C {
+extern "C" {
 #endif
 
 #include "fonts.h"
@@ -43,6 +43,8 @@ extern C {
 #ifndef SSD1306_HEIGHT
 #define SSD1306_HEIGHT           64
 #endif
+
+#define SSD1306_BUFFER_SIZE      (SSD1306_WIDTH * SSD1306_HEIGHT / 8U)
 
 /**
  * @brief  SSD1306 color enumeration
@@ -78,9 +80,18 @@ uint8_t SSD1306_Init(void);
  * @brief  Updates buffer from internal RAM to LCD
  * @note   This function must be called each time you do some changes to LCD, to update buffer from RAM to LCD
  * @param  None
- * @retval None
+ * @retval 1 on success, 0 after an I2C failure
  */
-void SSD1306_UpdateScreen(void);
+uint8_t SSD1306_UpdateScreen(void);
+
+/*
+ * Optional snapshot API for applications that need to transfer a stable copy.
+ * This project now uses a single screen owner, so normal rendering calls the
+ * direct update API without any application critical section.
+ */
+uint8_t SSD1306_CopyBuffer(uint8_t *destination, uint16_t destination_size);
+uint8_t SSD1306_UpdateScreenFromBuffer(const uint8_t *frame,
+                                       uint16_t frame_size);
 
 /**
  * @brief  Toggles pixels invertion inside internal RAM

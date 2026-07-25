@@ -1,83 +1,504 @@
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
-#include "system_log.h"
-#include "system_init.h"
+
 #include "screen_task.h"
-#include "button_task.h"
-#include "buzzer_task.h"
-#include "screen.h"
-#include "ssd1306.h"
+
 #include "archery.h"
 #include "arrow.h"
-#include "border.h"
-#include "meteoroid.h"
 #include "bang.h"
-#include "FreeRTOS.h"
-#include "timers.h"
-#include "task.h"
-#include "event_groups.h"
-
-#include "cmsis_gcc.h"
 #include "bitmap.h"
+#include "border.h"
+#include "buzzer_task.h"
+#include "game_session.h"
+#include "game_state.h"
+#include "meteoroid.h"
+#include "screen.h"
+#include "screen_saver.h"
+#include "ssd1306.h"
+#include "system_init.h"
+#include "system_log.h"
+
+#include "FreeRTOS.h"
+#include "event_groups.h"
+#include "task.h"
+#include "timers.h"
 
 EventGroupHandle_t screen_event_state = NULL;
 TimerHandle_t timer_update_screen_handle = NULL;
 TaskHandle_t task_update_screen_handle = NULL;
 
-#define ALL_BIT                 (SCREEN_UPDATE_BIT | SCREEN_GAME_OVER_BIT)
+#define SCREEN_ALL_BITS \
+    (SCREEN_UPDATE_BIT | SCREEN_GAME_OVER_BIT | SCREEN_GAME_START_BIT | \
+     SCREEN_SAVER_EXIT_BIT | SCREEN_SAVER_ADD_BIT | \
+     SCREEN_SAVER_REMOVE_BIT | SCREEN_RETURN_TO_START_BIT)
 
-static char your_score[4] = "0000";
-static char best_score[4] = "0000";
+#define SCREEN_IDLE_TIMEOUT_MS          (10000U)
+#define SCREEN_SAVER_FRAME_PERIOD_MS    (40U)
 
-static void update_screen_befor_display_handler(TimerHandle_t xTimer)
+/* uint32_t needs at most ten decimal digits plus the string terminator. */
+static char your_score[11] = {0};
+static char best_score[11] = {0};
+
+/*
+ * Lifecycle state shares game_state_mutex with object data.  This avoids
+ * relying on volatile (which does not provide inter-task synchronization).
+ */
+static screen_mode_t screen_mode = SCREEN_MODE_WAITING_FOR_START;
+static screen_saver_t screen_saver;
+static TickType_t screen_saver_next_frame = 0U;
+
+typedef struct {
+    game_archery_t archery;
+    game_arrow_t arrows[ARROW_MAX_NUM];
+    game_meteoroid_t meteoroids[METEROID_MAX_NUM];
+    game_bang_t bangs[BANG_MAX_NUM];
+    game_border_t border;
+} screen_game_snapshot_t;
+
+static bool screen_present(void)
 {
-    unused(xTimer);
-    xEventGroupSetBits(archery_event_state, ARCHERY_INIT_BIT); // update archery object
-    // xTimerStop(timer_update_screen_handle, pdMS_TO_TICKS(0));
+    /*
+     * Screen task is the sole runtime owner of both the SSD1306 framebuffer and
+     * I2C transfer, so no mutex or interrupt masking is necessary here.
+     */
+    return SSD1306_UpdateScreen() != 0U;
+}
+
+static void screen_set_mode(screen_mode_t mode)
+{
+    game_state_lock();
+    screen_mode = mode;
+    game_state_unlock();
+}
+
+static void screen_display_waiting_for_start(void)
+{
+    SSD1306_Clear();
+    SSD1306_GotoXY(0, 2);
+    SSD1306_Puts("ARCHERY GAME", &Font_11x18, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(2, 24);
+    SSD1306_Puts("Design by Minh Chi", &Font_7x10, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(4, 49);
+    SSD1306_Puts("PRESS OK TO START", &Font_7x10, SSD1306_COLOR_WHITE);
+
+    if (!screen_present()) {
+        DBG_LOG("OLED waiting-screen transfer failed");
+        return;
+    }
+
+    /*
+     * The start melody describes the visible prompt, not the gameplay action.
+     * Publish it only after the framebuffer has reached the OLED successfully.
+     */
+    configASSERT(buzzer_event_state != NULL);
+    xEventGroupSetBits(buzzer_event_state, GAME_START_SOUND_BIT);
+}
+
+static void screen_render_saver_frame(void)
+{
+    SSD1306_Clear();
+
+    for (uint8_t i = 0U; i < screen_saver_count(&screen_saver); i++) {
+        int16_t x;
+        int16_t y;
+
+        if (screen_saver_get_circle(&screen_saver, i, &x, &y)) {
+            /*
+             * Draw an outline rather than a filled disk.  Ten circles therefore
+             * remain visually readable even when their paths overlap.
+             */
+            SSD1306_DrawCircle(x, y, SCREEN_SAVER_CIRCLE_RADIUS,
+                               SSD1306_COLOR_WHITE);
+        }
+    }
+
+    if (!screen_present()) {
+        DBG_LOG("OLED screensaver transfer failed");
+    }
+}
+
+static void screen_enter_saver(void)
+{
+    /*
+     * A new session always restarts at one centered circle.  The time-based
+     * seed changes the random positions and directions of later UP additions.
+     */
+    screen_saver_init(&screen_saver,
+                      sys_get_tick() ^ 0xA511E9B3UL);
+    /*
+     * Establish the deadline before rendering.  OLED transfer time is therefore
+     * included in the 40 ms period instead of being added on top of it.
+     */
+    screen_saver_next_frame =
+        xTaskGetTickCount() +
+        pdMS_TO_TICKS(SCREEN_SAVER_FRAME_PERIOD_MS);
+    screen_set_mode(SCREEN_MODE_SCREENSAVER);
+    screen_render_saver_frame();
+}
+
+static void screen_leave_saver(void)
+{
+    /*
+     * OK exits only to the normal start screen.  A second, deliberate OK press
+     * is required to launch gameplay.
+     */
+    screen_set_mode(SCREEN_MODE_WAITING_FOR_START);
+    screen_display_waiting_for_start();
+}
+
+static TickType_t screen_wait_timeout(screen_mode_t mode)
+{
+    if (mode == SCREEN_MODE_WAITING_FOR_START) {
+        return pdMS_TO_TICKS(SCREEN_IDLE_TIMEOUT_MS);
+    }
+
+    if (mode == SCREEN_MODE_SCREENSAVER) {
+        TickType_t now = xTaskGetTickCount();
+
+        /*
+         * Signed modular subtraction remains correct across the 32-bit tick
+         * wrap as long as the frame period is below half the tick range.
+         */
+        if ((int32_t)(screen_saver_next_frame - now) <= 0) {
+            return 0U;
+        }
+        return screen_saver_next_frame - now;
+    }
+
+    return portMAX_DELAY;
+}
+
+static void screen_schedule_next_saver_frame(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    TickType_t period = pdMS_TO_TICKS(SCREEN_SAVER_FRAME_PERIOD_MS);
+
+    /*
+     * Advance from the previous deadline, not from "now".  If a slow I2C retry
+     * misses a frame, skip stale deadlines without accumulating long-term drift.
+     */
+    do {
+        screen_saver_next_frame += period;
+    } while ((int32_t)(screen_saver_next_frame - now) <= 0);
+}
+
+static void screen_snapshot_game(screen_game_snapshot_t *snapshot)
+{
+    game_state_lock();
+
+    snapshot->archery = game_archery;
+    snapshot->border = game_border;
+
+    for (uint8_t i = 0U; i < ARROW_MAX_NUM; i++) {
+        snapshot->arrows[i] = game_arrow[i];
+    }
+
+    for (uint8_t i = 0U; i < METEROID_MAX_NUM; i++) {
+        snapshot->meteoroids[i] = game_meteoroid[i];
+    }
+
+    for (uint8_t i = 0U; i < BANG_MAX_NUM; i++) {
+        snapshot->bangs[i] = game_bang[i];
+    }
+
+    game_state_unlock();
+}
+
+static const unsigned char *screen_arrow_count_bitmap(int16_t arrow_count)
+{
+    switch (arrow_count) {
+        case 0:
+            return bitmap_arrow_0;
+        case 1:
+            return bitmap_arrow_1;
+        case 2:
+            return bitmap_arrow_2;
+        case 3:
+            return bitmap_arrow_3;
+        case 4:
+            return bitmap_arrow_4;
+        default:
+            return bitmap_arrow_5;
+    }
+}
+
+static void screen_draw_bang(const game_bang_t *bang)
+{
+    if (!bang->visible) {
+        return;
+    }
+
+    /*
+     * State 3 uses the smaller final sprite and preserves the original visual
+     * offset.  Earlier states share the 15x15 animation footprint.
+     */
+    if (bang->state == 3U) {
+        SSD1306_DrawBitmap(bang->x + 2, bang->y + 3, bang->action_img,
+                           BANG_III_WIDTH, BANG_III_HEIGH,
+                           SSD1306_COLOR_WHITE);
+    } else {
+        SSD1306_DrawBitmap(bang->x, bang->y, bang->action_img,
+                           BANG_I_WIDTH, BANG_I_HEIGH,
+                           SSD1306_COLOR_WHITE);
+    }
+}
+
+static void screen_render_game_frame(void)
+{
+    screen_game_snapshot_t snapshot;
+    char score_text[11] = {0};
+
+    /*
+     * Copy a coherent state quickly, release its mutex, then perform all pixel
+     * work on private data.  Gameplay therefore never waits for OLED I2C.
+     */
+    screen_snapshot_game(&snapshot);
+
+    SSD1306_Clear();
+    SSD1306_DrawBitmap(snapshot.border.x_border, snapshot.border.y_border,
+                       snapshot.border.action_img, BORDER_WIDTH, BORDER_HEIGH,
+                       SSD1306_COLOR_WHITE);
+
+    SSD1306_DrawBitmap(ARROW_NUM_X, ARROW_NUM_Y,
+                       screen_arrow_count_bitmap(snapshot.border.arrow_num),
+                       ARROW_NUM_WIDTH, ARROW_NUM_HEIGH,
+                       SSD1306_COLOR_WHITE);
+
+    snprintf(score_text, sizeof(score_text), "%u",
+             (unsigned int)snapshot.border.game_score);
+    SSD1306_GotoXY(37, 55);
+    SSD1306_Puts(score_text, &Font_6x8, SSD1306_COLOR_WHITE);
+
+    if (snapshot.archery.visible) {
+        SSD1306_DrawBitmap(snapshot.archery.x, snapshot.archery.y,
+                           snapshot.archery.action_img, ARCHERY_WIDTH,
+                           ARCHERY_HEIGH, SSD1306_COLOR_WHITE);
+    }
+
+    for (uint8_t i = 0U; i < METEROID_MAX_NUM; i++) {
+        if (snapshot.meteoroids[i].visible) {
+            SSD1306_DrawBitmap(snapshot.meteoroids[i].x,
+                               snapshot.meteoroids[i].y,
+                               snapshot.meteoroids[i].action_img,
+                               METEOROID_WIDTH, METEOROID_HEIGH,
+                               SSD1306_COLOR_WHITE);
+        }
+    }
+
+    for (uint8_t i = 0U; i < ARROW_MAX_NUM; i++) {
+        if (snapshot.arrows[i].visible) {
+            SSD1306_DrawBitmap(snapshot.arrows[i].x, snapshot.arrows[i].y,
+                               snapshot.arrows[i].action_img, ARROW_WIDTH,
+                               ARROW_HEIGHT, SSD1306_COLOR_WHITE);
+        }
+    }
+
+    for (uint8_t i = 0U; i < BANG_MAX_NUM; i++) {
+        screen_draw_bang(&snapshot.bangs[i]);
+    }
+
+    if (!screen_present()) {
+        DBG_LOG("OLED frame transfer failed");
+    }
+}
+
+static void screen_update_tick_callback(TimerHandle_t timer)
+{
+    (void)timer;
+
+    /*
+     * Software-timer callbacks must remain bounded.  The callback only starts
+     * the gameplay pipeline; rendering and object updates run in worker tasks.
+     */
+    xEventGroupSetBits(archery_event_state, ARCHERY_INIT_BIT);
 }
 
 static void screen_display_game_over(void)
 {
+    uint32_t final_score;
+    uint32_t final_best;
+
+    game_state_lock();
+    final_score = game_border.game_score;
+    final_best = game_border.highest_score;
+    game_state_unlock();
+
     SSD1306_Clear();
-    SSD1306_DrawFilledRectangle(0, 0, 128, 64, SSD1306_COLOR_WHITE);
+    SSD1306_DrawFilledRectangle(0, 0, SSD1306_WIDTH, SSD1306_HEIGHT,
+                                SSD1306_COLOR_WHITE);
     SSD1306_GotoXY(18, 5);
     SSD1306_Puts("GAME OVER", &Font_11x18, SSD1306_COLOR_BLACK);
     SSD1306_GotoXY(2, 27);
     SSD1306_Puts("BEST SCORE:", &Font_7x10, SSD1306_COLOR_BLACK);
-    sprintf(best_score, "%d", game_border.highest_score);
+    snprintf(best_score, sizeof(best_score), "%u", (unsigned int)final_best);
     SSD1306_GotoXY(79, 27);
     SSD1306_Puts(best_score, &Font_7x10, SSD1306_COLOR_BLACK);
     SSD1306_GotoXY(2, 39);
     SSD1306_Puts("YOUR SCORE:", &Font_7x10, SSD1306_COLOR_BLACK);
-    sprintf(your_score, "%d", game_border.game_score);
+    snprintf(your_score, sizeof(your_score), "%u", (unsigned int)final_score);
     SSD1306_GotoXY(79, 39);
     SSD1306_Puts(your_score, &Font_7x10, SSD1306_COLOR_BLACK);
-    SSD1306_GotoXY(9, 55);
-    SSD1306_Puts("PRESS ANY BUTTON", &Font_7x10, SSD1306_COLOR_BLACK);
-    SSD1306_UpdateScreen();
+    /*
+     * Match the state machine precisely: only OK performs a software restart.
+     */
+    SSD1306_GotoXY(37, 55);
+    SSD1306_Puts("PRESS OK", &Font_7x10, SSD1306_COLOR_BLACK);
+
+    if (!screen_present()) {
+        DBG_LOG("OLED update failed on game-over screen");
+    }
 }
 
-static void task_update_screen(void* param)
+static void screen_update_high_score(void)
 {
-    unused(param);
-    EventBits_t uxBits;
-    while(true){
-        uxBits = xEventGroupWaitBits(screen_event_state, ALL_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
-        if(uxBits & SCREEN_UPDATE_BIT){
-            portENTER_CRITICAL();
-            SSD1306_UpdateScreen();
-            portEXIT_CRITICAL();
+    uint32_t current_score;
+    uint32_t stored_score;
+    uint32_t highest_score;
+
+    game_state_lock();
+    current_score = game_border.game_score;
+    game_state_unlock();
+
+    /*
+     * Flash access is intentionally outside the state mutex: an erase/program
+     * cycle must never stall unrelated input or gameplay-state readers.
+     */
+    stored_score = sys_read_score_in_flash(SCORE_FLASH_ADDRESS);
+    highest_score = stored_score;
+
+    if (current_score > stored_score) {
+        if (!sys_save_score_into_flash(SCORE_FLASH_ADDRESS, current_score)) {
+            DBG_LOG("Failed to persist high score");
         }
-        else{
-            xTimerStop(meteoroid_timer, 0);
-            vTaskSuspend(task_arrow_update_handle);
-            vTaskSuspend(task_archery_update_handle);
-            vTaskSuspend(task_border_update_handle);
-            vTaskSuspend(task_update_bang_handle);
-            vTaskDelay(1300);
-            screen_display_game_over();
-            vTaskSuspend(NULL);
+        highest_score = current_score;
+    }
+
+    game_state_lock();
+    game_border.highest_score = highest_score;
+    game_state_unlock();
+}
+
+static void screen_start_game(void)
+{
+    /*
+     * Publish RUNNING before waking producers so every worker accepts the first
+     * tick.  Timers were created during boot but are deliberately started only
+     * after the user presses OK.
+     */
+    screen_set_mode(SCREEN_MODE_RUNNING);
+
+    screen_render_game_frame();
+    xEventGroupSetBits(archery_event_state, ARCHERY_INIT_BIT);
+
+    configASSERT(xTimerStart(timer_update_screen_handle,
+                             pdMS_TO_TICKS(10U)) == pdPASS);
+    /*
+     * xTimerChangePeriod also starts a dormant timer.  Using the freshly reset
+     * initial period prevents difficulty from leaking across play-throughs.
+     */
+    configASSERT(
+        xTimerChangePeriod((TimerHandle_t)meteoroid_timer,
+                           pdMS_TO_TICKS(meteoroid_timer_period_ms),
+                           pdMS_TO_TICKS(10U)) == pdPASS);
+}
+
+static void screen_finish_game(void)
+{
+    /*
+     * Stop both periodic producers.  Worker tasks stay alive and blocked, which
+     * is safer than externally suspending tasks at arbitrary instruction points.
+     */
+    configASSERT(xTimerStop(timer_update_screen_handle,
+                            pdMS_TO_TICKS(10U)) == pdPASS);
+    configASSERT(xTimerStop((TimerHandle_t)meteoroid_timer,
+                            pdMS_TO_TICKS(10U)) == pdPASS);
+
+    screen_update_high_score();
+    xEventGroupSetBits(buzzer_event_state, GAME_OVER_SOUND_BIT);
+
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    screen_display_game_over();
+
+    /*
+     * Input becomes active only after the result screen is actually visible.
+     * This replaces external suspension of the button task with explicit state.
+     */
+    screen_set_mode(SCREEN_MODE_GAME_OVER);
+}
+
+static void screen_return_to_start(void)
+{
+    /*
+     * Keep all RTOS resources alive and reset only per-game data.  This gives
+     * deterministic replay without heap churn or a disruptive MCU reset.
+     */
+    game_session_reset();
+    screen_set_mode(SCREEN_MODE_WAITING_FOR_START);
+    screen_display_waiting_for_start();
+}
+
+static void task_update_screen(void *param)
+{
+    (void)param;
+
+    for (;;) {
+        screen_mode_t mode = screen_get_mode();
+        EventBits_t bits = xEventGroupWaitBits(screen_event_state,
+                                               SCREEN_ALL_BITS,
+                                               pdTRUE,
+                                               pdFALSE,
+                                               screen_wait_timeout(mode));
+
+        if (bits == 0U) {
+            /*
+             * A timeout has a different meaning in each non-game state:
+             * 10 seconds enters the saver; 40 ms advances one animation frame.
+             */
+            mode = screen_get_mode();
+            if (mode == SCREEN_MODE_WAITING_FOR_START) {
+                screen_enter_saver();
+            } else if (mode == SCREEN_MODE_SCREENSAVER) {
+                screen_saver_step(&screen_saver);
+                screen_render_saver_frame();
+                screen_schedule_next_saver_frame();
+            }
+            continue;
+        }
+
+        if ((bits & SCREEN_GAME_OVER_BIT) != 0U) {
+            screen_finish_game();
+        } else if ((bits & SCREEN_RETURN_TO_START_BIT) != 0U) {
+            screen_return_to_start();
+        } else if ((bits & SCREEN_GAME_START_BIT) != 0U) {
+            screen_start_game();
+        } else if ((bits & SCREEN_SAVER_EXIT_BIT) != 0U) {
+            screen_leave_saver();
+        } else if (screen_get_mode() == SCREEN_MODE_SCREENSAVER) {
+            bool saver_changed = false;
+
+            if ((bits & SCREEN_SAVER_ADD_BIT) != 0U) {
+                saver_changed =
+                    screen_saver_add_circle(&screen_saver) ||
+                    saver_changed;
+            }
+
+            if ((bits & SCREEN_SAVER_REMOVE_BIT) != 0U) {
+                saver_changed =
+                    screen_saver_remove_circle(&screen_saver) ||
+                    saver_changed;
+            }
+
+            /*
+             * At min/max count the command is intentionally a no-op.  Otherwise
+             * redraw immediately so UP/DOWN feedback does not wait 40 ms.
+             */
+            if (saver_changed) {
+                screen_render_saver_frame();
+            }
+        } else if (((bits & SCREEN_UPDATE_BIT) != 0U) &&
+                   (screen_get_mode() == SCREEN_MODE_RUNNING)) {
+            screen_render_game_frame();
         }
     }
 }
@@ -85,48 +506,151 @@ static void task_update_screen(void* param)
 void screen_task_create(void)
 {
     BaseType_t status;
-    SSD1306_Clear();
-    status = xTaskCreate(task_update_screen, "task update screen", 512, NULL, TASK_UPDATE_SCREEN_PRIORITY, &task_update_screen_handle);
-    if(status == pdFAIL){
-        __disable_irq();
-        while(true);
-    }
-    
-    screen_event_state =  xEventGroupCreate();
-    if(screen_event_state == NULL){
-        __disable_irq();
-        while(true);
-    }
 
-    timer_update_screen_handle = xTimerCreate("timer update screen", pdMS_TO_TICKS(100), pdTRUE, NULL, update_screen_befor_display_handler);
-    if(timer_update_screen_handle == NULL){
-        __disable_irq();
-        while(true);
-    }
-    xTimerStart(timer_update_screen_handle, pdMS_TO_TICKS(100));
+    /* Create every dependency before exposing the consumer task. */
+    screen_event_state = xEventGroupCreate();
+    configASSERT(screen_event_state != NULL);
+
+    timer_update_screen_handle = xTimerCreate("game cadence",
+                                               pdMS_TO_TICKS(100U),
+                                               pdTRUE,
+                                               NULL,
+                                               screen_update_tick_callback);
+    configASSERT(timer_update_screen_handle != NULL);
+
+    status = xTaskCreate(task_update_screen, "screen owner", 768U, NULL,
+                         TASK_UPDATE_SCREEN_PRIORITY,
+                         &task_update_screen_handle);
+    configASSERT(status == pdPASS);
+
+    /*
+     * No gameplay timer is started here.  The splash remains stable until the
+     * button task publishes SCREEN_GAME_START_BIT.
+     */
 }
 
 void task_screen_begin(void)
 {
-    char cnt[2] = "00";
-    uint8_t _cnt = 7;
     screen_init();
-    SSD1306_GotoXY(0, 2);
-    SSD1306_Puts("ARCHERY GAME", &Font_11x18, SSD1306_COLOR_WHITE);
-    SSD1306_GotoXY(2, 22);
-    SSD1306_Puts("Design by Minh Chi", &Font_7x10, SSD1306_COLOR_WHITE);
-    SSD1306_UpdateScreen();
-    buzzer_play_tone_game_begin();
-    SSD1306_GotoXY(7, 39);
-    SSD1306_Puts("Game start after", &Font_7x10, SSD1306_COLOR_WHITE);
-    while(--_cnt){
-        sprintf(cnt, "%d", _cnt);
-        SSD1306_DrawRectangle(60, 51, 7, 10, SSD1306_COLOR_BLACK);
-        SSD1306_GotoXY(60, 51);
-        SSD1306_Puts(cnt, &Font_7x10, SSD1306_COLOR_WHITE);
-        SSD1306_UpdateScreen();
-        sys_delay(1000);
+
+    /*
+     * main() is the sole execution context before vTaskStartScheduler(), so the
+     * boot splash can be sent directly.  The buzzer event group already exists;
+     * its queued start-melody event runs as soon as scheduling begins.
+     */
+    screen_display_waiting_for_start();
+}
+
+void screen_request_frame(void)
+{
+    if (screen_get_mode() == SCREEN_MODE_RUNNING) {
+        xEventGroupSetBits(screen_event_state, SCREEN_UPDATE_BIT);
     }
 }
 
+void screen_request_game_start(void)
+{
+    bool publish_start = false;
 
+    game_state_lock();
+
+    if (screen_mode == SCREEN_MODE_WAITING_FOR_START) {
+        /*
+         * START_PENDING suppresses repeated OK edges while screen task is
+         * waiting to run, making the transition idempotent.
+         */
+        screen_mode = SCREEN_MODE_START_PENDING;
+        publish_start = true;
+    }
+
+    game_state_unlock();
+
+    if (publish_start) {
+        xEventGroupSetBits(screen_event_state, SCREEN_GAME_START_BIT);
+    }
+}
+
+void screen_request_game_over(void)
+{
+    bool publish_game_over = false;
+
+    game_state_lock();
+
+    if (screen_mode == SCREEN_MODE_RUNNING) {
+        /*
+         * Change mode before publishing the event so all producers stop
+         * mutating state immediately, even if screen task runs a little later.
+         */
+        screen_mode = SCREEN_MODE_GAME_OVER_TRANSITION;
+        publish_game_over = true;
+    }
+
+    game_state_unlock();
+
+    if (publish_game_over) {
+        xEventGroupSetBits(screen_event_state, SCREEN_GAME_OVER_BIT);
+    }
+}
+
+void screen_request_return_to_start(void)
+{
+    bool publish_return = false;
+
+    game_state_lock();
+
+    if (screen_mode == SCREEN_MODE_GAME_OVER) {
+        /*
+         * The pending state makes repeated button edges idempotent while the
+         * screen owner restores the next session.
+         */
+        screen_mode = SCREEN_MODE_RETURN_TO_START_PENDING;
+        publish_return = true;
+    }
+
+    game_state_unlock();
+
+    if (publish_return) {
+        xEventGroupSetBits(screen_event_state, SCREEN_RETURN_TO_START_BIT);
+    }
+}
+
+void screen_request_saver_exit(void)
+{
+    if (screen_get_mode() == SCREEN_MODE_SCREENSAVER) {
+        xEventGroupSetBits(screen_event_state, SCREEN_SAVER_EXIT_BIT);
+    }
+}
+
+void screen_request_saver_add_circle(void)
+{
+    if (screen_get_mode() == SCREEN_MODE_SCREENSAVER) {
+        xEventGroupSetBits(screen_event_state, SCREEN_SAVER_ADD_BIT);
+    }
+}
+
+void screen_request_saver_remove_circle(void)
+{
+    if (screen_get_mode() == SCREEN_MODE_SCREENSAVER) {
+        xEventGroupSetBits(screen_event_state, SCREEN_SAVER_REMOVE_BIT);
+    }
+}
+
+screen_mode_t screen_get_mode(void)
+{
+    screen_mode_t mode;
+
+    game_state_lock();
+    mode = screen_mode;
+    game_state_unlock();
+
+    return mode;
+}
+
+bool screen_gameplay_is_running_locked(void)
+{
+    /*
+     * Deliberately do not take game_state_mutex here.  Every caller already
+     * holds it, so locking again would deadlock FreeRTOS's non-recursive mutex.
+     */
+    return screen_mode == SCREEN_MODE_RUNNING;
+}

@@ -1,70 +1,155 @@
-# A Game Embed: Archery game
+# Archery Game — STM32F411RE / FreeRTOS
 
-## Introduction
-This application was written to delve into the ARM Cortex-M microcontroller architecture and real-time operating systems (RTOS). Inspired by an existing application ([Source here](https://github.com/the-ak-foundation/archery-game)) written using Event-driven Framwok, I ported it to the FreeRTOS platform on STM32F411 Nucleo board
+An embedded archery game created to study ARM Cortex-M4 startup, exception
+handling, linker scripts, peripheral drivers, and real-time design. The project
+keeps its original event-driven gameplay: each game object owns a task or timer
+and communicates through queues, semaphores, and event groups.
 
-## Technical
-* C/C++ Language
-* Linker script
-* Makefile
-* FreeRTOS Porting
-* Ring Buffer
+## What this project demonstrates
 
-## Installation
-### Hardware Connection
-If you want to build one yourself, researching and developing it according to your preferences, first download the board schematic and connect it according to the following diagram:
+- Bare-metal Cortex-M startup, vector table, C runtime initialization, and FPU
+- A memory-safe linker layout with a dedicated persistent Flash partition
+- FreeRTOS tasks, software timers, queues, semaphores, and event groups
+- SSD1306 rendering over timeout-bounded I2C with bus recovery
+- UART logging over DMA with concurrency and DMA-error handling
+- Retained Cortex-M fault records, stack-overflow and allocation hooks
+- Wear-reduced, CRC-protected high-score journaling in Flash sector 7
+- Separate reproducible Debug and Release firmware outputs
 
-| PCB| STM32F411 Nucleo Board|
-| ------ | ----------- |
-| DI BT_OK | PB3|
-| OLED_SDA | PB7 |
-| OLED_SDA | PB6 |
-| DO LED_LIFE | PC7 |
-| DO BUZZER | PA6 |
-| DI BT_UP | PA4 |
-| DI BT_UP | PB0 |
-| 3V3 | 3V3 |
-| 5V | 5V |
-| GND | GND|
+## Runtime architecture
 
-### Sofware Installation and Run
-#### For Linux
-* Step 1: Install GCC for Arm and Debuger
-```
-sudo apt update
-sudo apt install gcc-arm-none-eabi gdb-multiarch
-```
-* Step 2: Install Make
-```
-sudo apt install build-essential
-```
-* Step 3: Install OpenOCD
-```
-sudo apt install openocd
-```
-* Step 4: Install ST-Link Driver
-```
-sudo wget -O /etc/udev/rules.d/99-openocd.rules https://raw.githubusercontent.com/stlink-org/stlink/develop/config/udev/rules.d/49-stlinkv2.rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
-`Unplug and plug back in for it to take effect.`
-* Step 5: Buid and Flash
-```
-make
-make flash
+```text
+Reset_Handler
+  -> SystemInit (100 MHz clock/FPU/VTOR)
+  -> C runtime (.data, .bss, constructors)
+  -> board and diagnostic initialization
+  -> splash screen ("PRESS OK TO START")
+  -> object tasks/timers and IPC creation
+  -> FreeRTOS scheduler
+
+Button task --OK--> lifecycle event -> start gameplay timers
+Game timer -> archery/arrow workers -> collision/bang state machine
+Meteor timer -> task notification -> meteoroid worker
+Object workers -> coherent game-state snapshot -> screen-owner task -> OLED
 ```
 
-#### For Windows
-* Step 1: Install Git for Windows [here](https://git-scm.com/install/windows)
-* Step 2: Download GCC for Arm [here](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads)
-* Step 3: Add path to GCC for Arm to Enviroment Variable
-* Step 4: Install ST-Link Driver [here](https://www.st.com/en/development-tools/stsw-link009.html)
-* Step 5: Open the root directory of this project with Git bash
-* Step 6: Build and Flash
+Only the screen-owner task accesses the SSD1306 framebuffer and I2C peripheral.
+Object workers update state under one priority-inheritance mutex, then request a
+frame through an event group. The renderer copies a coherent snapshot and
+releases the state mutex before drawing or performing the slower I2C transfer.
+Software-timer callbacks only publish notifications/events and never render,
+write Flash, or block on application mutexes.
+
+At boot the game starts on the splash screen. Gameplay timers and the start
+sound are activated only after a debounced press of the OK button. After ten
+seconds without input, the screen owner enters a 25 FPS screensaver whose Q8.8
+fixed-point circles reflect from all four display edges.
+
+## Hardware
+
+Target: **NUCLEO-F411RE**, STM32F411RETx, 512 KiB Flash, 128 KiB SRAM.
+
+| Signal | NUCLEO-F411RE pin |
+|---|---|
+| Button OK | PB3 |
+| Button Up | PA4 |
+| Button Down | PB0 |
+| OLED SDA | PB7 |
+| OLED SCL | PB6 |
+| Life LED | PC7 |
+| Buzzer | PA6 |
+| Power | 3V3 / 5V / GND as required by the attached hardware |
+
+### Controls
+
+- Startup screen: the start melody plays as soon as this prompt is displayed.
+  Press **OK** once to start; gameplay timers remain stopped while waiting.
+- After 10 seconds on the startup screen, screensaver mode begins with one
+  radius-8 circle at screen center. **Up** adds a random circle (maximum 10),
+  **Down** removes the newest circle first (minimum 1), and **OK** returns to
+  the startup screen.
+- During gameplay: **Up/Down** moves the archer and **OK** fires an arrow.
+- Game-over screen: press **OK** to perform a software session reset and return
+  to the startup screen. The MCU, RTOS tasks and peripherals remain running;
+  only per-game objects, pending pipeline signals and difficulty are reset.
+
+## Prerequisites
+
+- GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`, `objcopy`, `gdb`)
+- GNU Make
+- OpenOCD and an ST-Link driver for flashing/debugging
+- Git Bash on Windows, or a POSIX shell on Linux
+
+The final verification was performed with GNU Arm Embedded Toolchain 10.3.1.
+Override `CROSS_COMPILE` or `OPENOCD` when tools are not on `PATH`.
+
+## Build
+
+```bash
+# Debug: -Og, full symbols, assertions
+make BUILD_TYPE=Debug
+
+# Release: -Os, LTO, assertions still route through fatal system checks
+make BUILD_TYPE=Release
 ```
-make
-make flash
+
+Artifacts are isolated by configuration:
+
+```text
+build/Debug/game_embed.{elf,bin,hex,map}
+build/Release/game_embed.{elf,bin,hex,map}
 ```
-## Contact
-# `Hope You Enjoy`
+
+Useful targets:
+
+```bash
+make test
+make size BUILD_TYPE=Debug
+make listing BUILD_TYPE=Debug
+make clean
+```
+
+## Flash and debug
+
+```bash
+make flash BUILD_TYPE=Release
+```
+
+`make flash` programs only the application image. High-score data is kept in
+sector 7 (`0x08060000`–`0x0807FFFF`). To intentionally erase application and
+persistent data:
+
+```bash
+make full_flash_erase
+```
+
+For source debugging, start these in separate terminals:
+
+```bash
+make openocd_server
+make debug BUILD_TYPE=Debug
+```
+
+## Diagnostics
+
+UART1 logging uses PA9/PA10 at 115200 baud. Every fatal path records a stable reason
+code in `.noinit`, then resets. On the next boot, the log reports the active
+exception vector, stacked PC/LR/xPSR when available, and Cortex-M fault registers.
+Three consecutive failures before the scheduler reaches idle stop the reset loop
+and leave the MCU halted for debugger inspection.
+
+The stack monitor reports each task's high-water mark every five seconds.
+Production stack sizing should be based on a representative long-duration run,
+with margin for worst-case interrupt nesting and library calls.
+
+## Memory contract
+
+- `0x08000000`–`0x0805FFFF`: application image (384 KiB)
+- `0x08060000`–`0x0807FFFF`: score journal (128 KiB, Flash sector 7)
+- `0x20000000`–`0x2001FFFF`: SRAM (128 KiB)
+- Main stack reservation: 4 KiB
+- FreeRTOS heap: 36 KiB
+
+Link-time assertions reject application/NVM overlap and insufficient SRAM. Do not
+change the Flash partition without updating both the linker script and the
+sector number used by the score journal.

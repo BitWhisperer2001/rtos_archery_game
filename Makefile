@@ -1,289 +1,237 @@
-# Toolchain. Down load at: https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads
-CC = arm-none-eabi-gcc
-OBJCOPY = arm-none-eabi-objcopy
-SIZE = arm-none-eabi-size
-OBJDUMP = arm-none-eabi-objdump
-DBG = arm-none-eabi-gdb
+# -----------------------------------------------------------------------------
+# Reproducible GNU Arm build for STM32F411RE
+#
+# Design note: Make remains the canonical build tool to preserve the project's
+# original workflow. Debug and Release use separate directories so changing
+# optimization flags can never reuse incompatible object files.
+# -----------------------------------------------------------------------------
 
-# Project name
-TARGET = game_embed
+CROSS_COMPILE ?= arm-none-eabi-
+CC      := $(CROSS_COMPILE)gcc
+OBJCOPY := $(CROSS_COMPILE)objcopy
+SIZE    := $(CROSS_COMPILE)size
+OBJDUMP := $(CROSS_COMPILE)objdump
+GDB     := $(CROSS_COMPILE)gdb
+OPENOCD ?= openocd
+HOST_CC ?= gcc
 
-# Directories
-BUILD_DIR 				= build
-RESOURCE_INC_DIR		= app/resource
-APP_INC_DIR 			= app
-APP_SRC_DIR 			= app
-STD_INC_DIR 			= ThirdParty/STM32F4xx_StdPeriph_Driver/inc
-STD_SRC_DIR 			= ThirdParty/STM32F4xx_StdPeriph_Driver/src
-CMSIS_INC_DIR 			= ThirdParty/CMSIS/inc
-SSD1306_INC_DIR			= ThirdParty/SSD1306/inc
-SSD1306_SRC_DIR			= ThirdParty/SSD1306/src
-STARTUP_DIR 			= startup
-SYS_INC_DIR 			= system/inc
-SYS_SRC_DIR 			= system/src
-RTOS_SRC_DIR			= ThirdParty/FreeRTOS/src
-RTOS_INC_DIR			= ThirdParty/FreeRTOS/inc
-BSP_LED_INC_DIR			= bsp_drivers/led/inc
-BSP_LED_SRC_DIR			= bsp_drivers/led/src
-BSP_BUTTON_INC_DIR		= bsp_drivers/button/inc
-BSP_BUTTON_SRC_DIR		= bsp_drivers/button/src
-BSP_BUZZER_INC_DIR		= bsp_drivers/buzzer/inc
-BSP_BUZZER_SRC_DIR		= bsp_drivers/buzzer/src
-BSP_SCREEN_INC_DIR 		= bsp_drivers/screen/inc
-BSP_SCREEN_SRC_DIR 		= bsp_drivers/screen/src
-RESOURCES_DIR 			= app/resources
-GAME_OBJ_METEOROID		= app/gameObject/meteoroid
-GAME_OBJ_ARCHERY		= app/gameObject/archery
-GAME_OBJ_ARROW			= app/gameObject/arrow
-GAME_OBJ_BORDER			= app/gameObject/border
-GAME_OBJ_BANG			= app/gameObject/bang
-CONTAINER				= app/container
+TARGET     := game_embed
+BUILD_TYPE ?= Debug
+BUILD_DIR  := build/$(BUILD_TYPE)
+ELF        := $(BUILD_DIR)/$(TARGET).elf
+BIN        := $(BUILD_DIR)/$(TARGET).bin
+HEX        := $(BUILD_DIR)/$(TARGET).hex
+MAP        := $(BUILD_DIR)/$(TARGET).map
+LST        := $(BUILD_DIR)/$(TARGET).lst
+HOST_TEST  := build/host/ring_buffer_test
+HOST_SAVER_TEST := build/host/screen_saver_test
 
-# Source files
-SOURCES = $(APP_SRC_DIR)/app.c \
-		  $(APP_SRC_DIR)/button_task.c \
-		  $(APP_SRC_DIR)/screen_task.c \
-		  $(APP_SRC_DIR)/buzzer_task.c \
-		  $(APP_SRC_DIR)/led_task.c \
-          $(STD_SRC_DIR)/stm32f4xx_gpio.c \
-		  $(STD_SRC_DIR)/stm32f4xx_rcc.c \
-		  $(STD_SRC_DIR)/stm32f4xx_flash.c \
-		  $(STD_SRC_DIR)/stm32f4xx_tim.c \
-		  $(STD_SRC_DIR)/stm32f4xx_usart.c \
-		  $(STD_SRC_DIR)/stm32f4xx_dma.c \
-		  $(STD_SRC_DIR)/stm32f4xx_i2c.c \
-		  $(STD_SRC_DIR)/misc.c \
-		  $(RTOS_SRC_DIR)/croutine.c \
-		  $(RTOS_SRC_DIR)/event_groups.c \
-		  $(RTOS_SRC_DIR)/heap_4.c \
-		  $(RTOS_SRC_DIR)/list.c \
-		  $(RTOS_SRC_DIR)/port.c \
-		  $(RTOS_SRC_DIR)/queue.c \
-		  $(RTOS_SRC_DIR)/stream_buffer.c \
-		  $(RTOS_SRC_DIR)/tasks.c \
-		  $(RTOS_SRC_DIR)/timers.c \
-		  $(SSD1306_SRC_DIR)/fonts.c \
-		  $(SSD1306_SRC_DIR)/ssd1306.c \
-          $(STARTUP_DIR)/startup_stm32f411re.c \
-		  $(SYS_SRC_DIR)/system_init.c \
-		  $(SYS_SRC_DIR)/system_it.c \
-		  $(SYS_SRC_DIR)/system_log.c \
-		  $(SYS_SRC_DIR)/syscalls.c \
-		  $(SYS_SRC_DIR)/system_stm32f4xx.c \
-		  $(BSP_LED_SRC_DIR)/led.c \
-		  $(BSP_BUTTON_SRC_DIR)/button.c \
-		  $(BSP_BUZZER_SRC_DIR)/buzzer.c \
-		  $(BSP_SCREEN_SRC_DIR)/screen.c \
-		  $(RESOURCES_DIR)/bitmap.c \
-		  $(GAME_OBJ_METEOROID)/meteoroid.c \
-		  $(GAME_OBJ_ARCHERY)/archery.c \
-		  $(GAME_OBJ_ARROW)/arrow.c \
-		  $(GAME_OBJ_BORDER)/border.c \
-		  $(GAME_OBJ_BANG)/bang.c \
-		  $(CONTAINER)/ring_buffer.c
+SOURCES := \
+	app/app.c \
+	app/game_state.c \
+	app/game_session.c \
+	app/screen_saver.c \
+	app/button_task.c \
+	app/screen_task.c \
+	app/buzzer_task.c \
+	app/led_task.c \
+	app/stack_monitor.c \
+	app/container/ring_buffer.c \
+	app/resources/bitmap.c \
+	app/resources/sound.c \
+	app/gameObject/meteoroid/meteoroid.c \
+	app/gameObject/archery/archery.c \
+	app/gameObject/arrow/arrow.c \
+	app/gameObject/border/border.c \
+	app/gameObject/bang/bang.c \
+	bsp_drivers/led/src/led.c \
+	bsp_drivers/button/src/button.c \
+	bsp_drivers/buzzer/src/buzzer.c \
+	bsp_drivers/screen/src/screen.c \
+	startup/startup_stm32f411re.c \
+	system/src/system_init.c \
+	system/src/system_it.c \
+	system/src/system_log.c \
+	system/src/system_fault.c \
+	system/src/syscalls.c \
+	system/src/system_stm32f4xx.c \
+	system/src/freertos_hooks.c \
+	ThirdParty/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_gpio.c \
+	ThirdParty/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_rcc.c \
+	ThirdParty/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_flash.c \
+	ThirdParty/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_tim.c \
+	ThirdParty/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_usart.c \
+	ThirdParty/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_dma.c \
+	ThirdParty/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_i2c.c \
+	ThirdParty/STM32F4xx_StdPeriph_Driver/src/misc.c \
+	ThirdParty/FreeRTOS/src/croutine.c \
+	ThirdParty/FreeRTOS/src/event_groups.c \
+	ThirdParty/FreeRTOS/src/heap_4.c \
+	ThirdParty/FreeRTOS/src/list.c \
+	ThirdParty/FreeRTOS/src/port.c \
+	ThirdParty/FreeRTOS/src/queue.c \
+	ThirdParty/FreeRTOS/src/stream_buffer.c \
+	ThirdParty/FreeRTOS/src/tasks.c \
+	ThirdParty/FreeRTOS/src/timers.c \
+	ThirdParty/SSD1306/src/fonts.c \
+	ThirdParty/SSD1306/src/ssd1306.c
 
-# Object files
-OBJECTS = $(addprefix $(BUILD_DIR)/, $(notdir $(SOURCES:.c=.o)))
+INCLUDE_DIRS := \
+	app \
+	app/container \
+	app/resources \
+	app/gameObject/meteoroid \
+	app/gameObject/archery \
+	app/gameObject/arrow \
+	app/gameObject/border \
+	app/gameObject/bang \
+	bsp_drivers/led/inc \
+	bsp_drivers/button/inc \
+	bsp_drivers/buzzer/inc \
+	bsp_drivers/screen/inc \
+	system/inc \
+	ThirdParty/STM32F4xx_StdPeriph_Driver/inc \
+	ThirdParty/FreeRTOS/inc \
+	ThirdParty/CMSIS/inc \
+	ThirdParty/SSD1306/inc
 
-# Include paths
-INCLUDES = -I$(APP_INC_DIR) \
-		   -I$(RESOURCE_INC_DIR) \
-           -I$(STD_INC_DIR) \
-		   -I$(RTOS_INC_DIR) \
-		   -I$(CMSIS_INC_DIR) \
-		   -I$(SSD1306_INC_DIR) \
-		   -I$(SYS_INC_DIR) \
-		   -I$(BSP_LED_INC_DIR) \
-		   -I$(BSP_BUTTON_INC_DIR) \
-		   -I$(BSP_BUZZER_INC_DIR) \
-		   -I$(BSP_SCREEN_INC_DIR) \
-		   -I$(RESOURCES_DIR) \
-		   -I$(GAME_OBJ_METEOROID) \
-		   -I$(GAME_OBJ_ARCHERY) \
-		   -I$(GAME_OBJ_ARROW) \
-		   -I$(GAME_OBJ_BORDER) \
-		   -I$(GAME_OBJ_BANG) \
-		   -I$(CONTAINER)
+OBJECTS := $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o))
+DEPS    := $(OBJECTS:.o=.d)
+INCLUDES := $(addprefix -I,$(INCLUDE_DIRS))
 
-# Compiler flags
-CFLAGS = -mcpu=cortex-m4 \
-         -mthumb \
-         -mfloat-abi=hard \
-		 -mfpu=fpv4-sp-d16 \
-         -Wall \
-         -Wextra \
-         -O0 \
-         -g3 \
-         -ffunction-sections \
-         -fdata-sections \
-		 -DUSE_STDPERIPH_DRIVER \
-		 -DSTM32F411xE \
-         $(INCLUDES)
+ARCH_FLAGS := \
+	-mcpu=cortex-m4 \
+	-mthumb \
+	-mfloat-abi=hard \
+	-mfpu=fpv4-sp-d16
 
-# Linker flags
-LDFLAGS = -mcpu=cortex-m4 \
-          -mthumb \
-          -mfloat-abi=hard \
-		  -mfpu=fpv4-sp-d16 \
-          --specs=nano.specs \
-          -T linker_scripts.ld \
-          -Wl,-Map=$(BUILD_DIR)/$(TARGET).map \
-          -Wl,--print-memory-usage
+CPPFLAGS := \
+	-DUSE_STDPERIPH_DRIVER \
+	-DSTM32F411xE \
+	$(INCLUDES)
 
-# VPATH for source file locations
-VPATH = $(APP_SRC_DIR):$(STD_SRC_DIR):$(SSD1306_SRC_DIR):$(STARTUP_DIR):$(SYS_SRC_DIR):$(BSP_LED_SRC_DIR):$(BSP_BUTTON_SRC_DIR):$(BSP_BUZZER_SRC_DIR):$(BSP_SCREEN_SRC_DIR):$(RTOS_SRC_DIR):$(GAME_OBJ_METEOROID): \
-		$(RESOURCES_DIR):$(GAME_OBJ_ARCHERY):$(GAME_OBJ_ARROW):$(GAME_OBJ_BORDER):$(GAME_OBJ_BANG):$(CONTAINER)
+CFLAGS_COMMON := \
+	$(ARCH_FLAGS) \
+	-std=gnu11 \
+	-Wall \
+	-Wextra \
+	-Wshadow \
+	-Wformat=2 \
+	-Wstrict-prototypes \
+	-Werror \
+	-ffunction-sections \
+	-fdata-sections \
+	-MMD \
+	-MP
 
-# Default target
-all: $(BUILD_DIR) $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET).hex
+ifeq ($(BUILD_TYPE),Debug)
+	CFLAGS := $(CFLAGS_COMMON) -Og -g3 -DDEBUG
+else ifeq ($(BUILD_TYPE),Release)
+	CFLAGS := $(CFLAGS_COMMON) -Os -g1 -flto -DNDEBUG
+else
+	$(error BUILD_TYPE must be Debug or Release)
+endif
+
+LDFLAGS := \
+	$(ARCH_FLAGS) \
+	--specs=nano.specs \
+	-T linker_scripts.ld \
+	-Wl,-Map=$(MAP) \
+	-Wl,--gc-sections \
+	-Wl,--orphan-handling=warn \
+	-Wl,--cref \
+	-Wl,--fatal-warnings \
+	-Wl,--print-memory-usage
+
+ifeq ($(BUILD_TYPE),Release)
+	LDFLAGS += -flto
+endif
+
+.DEFAULT_GOAL := all
+.DELETE_ON_ERROR:
+
+all: check-toolchain $(ELF) $(BIN) $(HEX)
 	@echo "================================"
-	@echo "Build complete!"
+	@echo "Build complete: $(BUILD_TYPE)"
 	@echo "================================"
-	@$(SIZE) $(BUILD_DIR)/$(TARGET).elf
+	@$(SIZE) $(ELF)
 
-# Create build directory
-$(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
+check-toolchain:
+	@$(CC) --version | head -n 1
 
-# Link
-$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS)
+$(ELF): $(OBJECTS)
+	@mkdir -p $(dir $@)
 	@echo "Linking: $@"
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
 
-# Compile app source files
-$(BUILD_DIR)/%.o: $(APP_SRC_DIR)/%.c
+# Preserve the source directory tree under build/ to avoid basename collisions.
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
 	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-# Compile std files
-$(BUILD_DIR)/%.o: $(STD_SRC_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile SSD1306 files
-$(BUILD_DIR)/%.o: $(SSD1306_SRC_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile startup files
-$(BUILD_DIR)/%.o: $(STARTUP_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile system files
-$(BUILD_DIR)/%.o: $(SYS_SRC_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile FreeRTOS files
-$(BUILD_DIR)/%.o: $(RTOS_SRC_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile BSP LED files
-$(BUILD_DIR)/%.o: $(BSP_LED_SRC_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile BSP BUTTON files
-$(BUILD_DIR)/%.o: $(BSP_BUTTON_SRC_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile BSP BUZZER files
-$(BUILD_DIR)/%.o: $(BSP_BUZZER_SRC_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile BSP SCREEN files
-$(BUILD_DIR)/%.o: $(BSP_SCREEN_SRC_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile GAME METEOROID files
-$(BUILD_DIR)/%.o: $(GAME_OBJ_METEOROID)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile GAME ARCHERY files
-$(BUILD_DIR)/%.o: $(GAME_OBJ_ARCHERY)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile GAME ARROW files
-$(BUILD_DIR)/%.o: $(GAME_OBJ_ARROW)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile GAME BORDER files
-$(BUILD_DIR)/%.o: $(GAME_OBJ_BORDER)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile GAME BANG files
-$(BUILD_DIR)/%.o: $(GAME_OBJ_BANG)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile CONTAINER files
-$(BUILD_DIR)/%.o: $(CONTAINER)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile GAME RESOURCES files
-$(BUILD_DIR)/%.o: $(RESOURCES_DIR)/%.c
-	@echo "Compiling: $<"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Generate .bin file
-$(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET).elf
+$(BIN): $(ELF)
 	@echo "Creating binary: $@"
 	$(OBJCOPY) -O binary $< $@
 
-# Generate .hex file
-$(BUILD_DIR)/$(TARGET).hex: $(BUILD_DIR)/$(TARGET).elf
-	@echo "Creating hex: $@"
+$(HEX): $(ELF)
+	@echo "Creating Intel HEX: $@"
 	$(OBJCOPY) -O ihex $< $@
 
-# Generate .hex file
-# $(BUILD_DIR)/$(TARGET).asm: $(BUILD_DIR)/$(TARGET).elf
-# 	@echo "Creating asm: $@"
-# 	$(OBJCOPY) -d $(BUILD_DIR)/$(TARGET).elf > $(BUILD_DIR)/$(TARGET).asm
+$(LST): $(ELF)
+	@echo "Creating annotated listing: $@"
+	$(OBJDUMP) -d -S $< > $@
 
-# Clean
-clean:
-	@echo "Cleaning build files..."
-	rm -rf $(BUILD_DIR)
+size: $(ELF)
+	@echo "Memory usage:"
+	$(SIZE) $(ELF)
 
-# Dump
-objdump:
-	@echo "Dump final file !"
-	$(OBJDUMP) -h $(BUILD_DIR)/$(TARGET).elf
+objdump: $(ELF)
+	$(OBJDUMP) -h -S $(ELF)
 
-#Erase full flash using openOCD
+listing: $(LST)
+
+# A small host test validates the reusable container without target hardware.
+$(HOST_TEST): tests/test_ring_buffer.c app/container/ring_buffer.c app/container/ring_buffer.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -Iapp/container \
+		tests/test_ring_buffer.c app/container/ring_buffer.c -o $@
+
+$(HOST_SAVER_TEST): tests/test_screen_saver.c app/screen_saver.c app/screen_saver.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -Iapp \
+		tests/test_screen_saver.c app/screen_saver.c -o $@
+
+test: $(HOST_TEST) $(HOST_SAVER_TEST)
+	$(HOST_TEST)
+	$(HOST_SAVER_TEST)
+
+flash: all
+	@echo "Flashing $(ELF) via OpenOCD..."
+	$(OPENOCD) -f interface/stlink.cfg -f target/stm32f4x.cfg \
+		-c "program $(ELF) verify reset exit"
+
 full_flash_erase:
-	@echo "Erasing full flash..."
-	openocd -f interface/stlink.cfg -f target/stm32f4x.cfg -c "init; reset halt; stm32f4x mass_erase 0; exit"
-
-# Flash using OpenOCD. Download at: https://openocd.org/pages/getting-openocd.html
-flash: clean all full_flash_erase
-	@echo "Flashing via OpenOCD..."
-	openocd -f interface/stlink.cfg -f target/stm32f4x.cfg -c "program $(BUILD_DIR)/$(TARGET).elf verify reset exit"
+	@echo "WARNING: erasing application and persistent score data..."
+	$(OPENOCD) -f interface/stlink.cfg -f target/stm32f4x.cfg \
+		-c "init; reset halt; stm32f4x mass_erase 0; exit"
 
 openocd_server:
-	openocd -f interface/stlink.cfg -f target/stm32f4x.cfg
+	$(OPENOCD) -f interface/stlink.cfg -f target/stm32f4x.cfg
 
-# Debug with GDB
-debug:
-	arm-none-eabi-gdb.exe
-# $(DBG) $(BUILD_DIR)/$(TARGET).elf
+debug: $(ELF)
+	# Connect to a separately running `make openocd_server` session.
+	$(GDB) -q $(ELF) -ex "target extended-remote :3333" \
+		-ex "monitor reset halt"
 
-# Show size
-size: $(BUILD_DIR)/$(TARGET).elf
-	@echo "Memory usage:"
-	$(SIZE) $
+clean:
+	@echo "Cleaning generated build outputs..."
+	rm -rf build
 
-# Rebuild
 rebuild: clean all
 
-.PHONY: all clean flash flash-openocd debug size rebuild tree
+-include $(DEPS)
+
+.PHONY: \
+	all check-toolchain size objdump listing flash full_flash_erase \
+	openocd_server debug clean rebuild test

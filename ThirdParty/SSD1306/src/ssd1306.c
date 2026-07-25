@@ -1,18 +1,18 @@
 #include "ssd1306.h"
 #include "screen.h"
 
-static void ssd1306_I2C_Write(uint8_t address, uint8_t reg, uint8_t data);
-static void ssd1306_I2C_WriteMulti(uint8_t address, uint8_t reg, uint8_t* data, uint16_t count);
+static screen_status_t ssd1306_I2C_Write(uint8_t address, uint8_t reg, uint8_t data);
+static screen_status_t ssd1306_I2C_WriteMulti(uint8_t address, uint8_t reg, const uint8_t* data, uint16_t count);
 
 /* Write command */
-#define SSD1306_WRITECOMMAND(command)      ssd1306_I2C_Write(SCREEN_ADDREES, 0x00, command)
+#define SSD1306_WRITECOMMAND(command)      ssd1306_I2C_Write(SCREEN_ADDRESS, 0x00, command)
 /* Write data */
-#define SSD1306_WRITEDATA(data)            ssd1306_I2C_Write(SCREEN_ADDREES, 0x40, data)
+#define SSD1306_WRITEDATA(data)            ssd1306_I2C_Write(SCREEN_ADDRESS, 0x40, data)
 /* Absolute value */
 #define ABS(x)   ((x) > 0 ? (x) : -(x))
 
 /* SSD1306 data buffer */
-static uint8_t SSD1306_Buffer[SSD1306_WIDTH * SSD1306_HEIGHT / 8];
+static uint8_t SSD1306_Buffer[SSD1306_BUFFER_SIZE];
 
 /* Private SSD1306 structure */
 typedef struct {
@@ -26,86 +26,83 @@ typedef struct {
 static SSD1306_t SSD1306;
 
 
-static void ssd1306_I2C_WriteMulti(uint8_t address, uint8_t reg, uint8_t* data, uint16_t count) {
-	(void)address;
+static screen_status_t ssd1306_I2C_WriteMulti(uint8_t address, uint8_t reg, const uint8_t* data, uint16_t count) {
 	uint8_t dt[256];
+
+	/* One byte is reserved for the SSD1306 control register prefix. */
+	if ((data == NULL) || (count > 255U)) {
+		return SCREEN_STATUS_INVALID_ARGUMENT;
+	}
+
 	dt[0] = reg;
-	uint8_t i;
+	uint16_t i;
 	for(i = 0; i < count; i++){
 		dt[i+1] = data[i];
 	}
-	screen_data_write(SCREEN_ADDREES, dt, count + 1);
+	return screen_data_write(address, dt, count + 1U);
 }
 
-
-static void ssd1306_I2C_Write(uint8_t address, uint8_t reg, uint8_t data) {
-	(void)address;
+static screen_status_t ssd1306_I2C_Write(uint8_t address, uint8_t reg, uint8_t data) {
 	uint8_t dt[2];
 	dt[0] = reg;
 	dt[1] = data;
-	screen_data_write(SCREEN_ADDREES, dt, 2);
+	return screen_data_write(address, dt, 2);
 }
 
 uint8_t SSD1306_Init(void) {
-
-	/* Init LCD */
-	SSD1306_WRITECOMMAND(0xAE); //display off
-	SSD1306_WRITECOMMAND(0x20); //Set Memory Addressing Mode   
-	SSD1306_WRITECOMMAND(0x10); //00,Horizontal Addressing Mode;01,Vertical Addressing Mode;10,Page Addressing Mode (RESET);11,Invalid
-	SSD1306_WRITECOMMAND(0xB0); //Set Page Start Address for Page Addressing Mode,0-7
-	SSD1306_WRITECOMMAND(0xC8); //Set COM Output Scan Direction
-	SSD1306_WRITECOMMAND(0x00); //---set low column address
-	SSD1306_WRITECOMMAND(0x10); //---set high column address
-	SSD1306_WRITECOMMAND(0x40); //--set start line address
-	SSD1306_WRITECOMMAND(0x81); //--set contrast control register
-	SSD1306_WRITECOMMAND(0xFF);
-	SSD1306_WRITECOMMAND(0xA1); //--set segment re-map 0 to 127
-	SSD1306_WRITECOMMAND(0xA6); //--set normal display
+	static const uint8_t initialization_commands[] = {
+		0xAE, /* Display off. */
+		0x20, 0x10, /* Page addressing mode. */
+		0xB0, 0xC8, 0x00, 0x10, 0x40,
+		0x81, 0xFF, /* Maximum contrast. */
+		0xA1, 0xA6,
 #if (SSD1306_HEIGHT == 128)
-    // Found in the Luma Python lib for SH1106.
-	SSD1306_WRITECOMMAND(0xFF);
+		0xFF, /* SH1106-compatible 128-pixel profile from the original driver. */
 #else
-	SSD1306_WRITECOMMAND(0xA8); //--set multiplex ratio(1 to 64) - CHECK
+		0xA8,
 #endif
 
 #if (SSD1306_HEIGHT == 32)
-	SSD1306_WRITECOMMAND(0x1F); //
+		0x1F,
 #elif (SSD1306_HEIGHT == 64)
-	SSD1306_WRITECOMMAND(0x3F); //
+		0x3F,
 #elif (SSD1306_HEIGHT == 128)
-	SSD1306_WRITECOMMAND(0x3F); // Seems to work for 128px high displays too.
+		0x3F,
 #endif
-	SSD1306_WRITECOMMAND(0xA4); //0xa4,Output follows RAM content;0xa5,Output ignores RAM content
-	SSD1306_WRITECOMMAND(0xD3); //-set display offset
-	SSD1306_WRITECOMMAND(0x00); //-not offset
-	SSD1306_WRITECOMMAND(0xD5); //--set display clock divide ratio/oscillator frequency
-	SSD1306_WRITECOMMAND(0xF0); //--set divide ratio
-	SSD1306_WRITECOMMAND(0xD9); //--set pre-charge period
-	SSD1306_WRITECOMMAND(0x22); //
-
-	SSD1306_WRITECOMMAND(0xDA); //--set com pins hardware configuration
+		0xA4, 0xD3, 0x00, 0xD5, 0xF0, 0xD9, 0x22, 0xDA,
 #if (SSD1306_HEIGHT == 32)
-	SSD1306_WRITECOMMAND(0x02);
+		0x02,
 #elif (SSD1306_HEIGHT == 64)
-	SSD1306_WRITECOMMAND(0x12);
+		0x12,
 #elif (SSD1306_HEIGHT == 128)
-	SSD1306_WRITECOMMAND(0x12);
+		0x12,
 #endif
+		0xDB, 0x20, 0x8D, 0x14, 0xAF,
+		SSD1306_DEACTIVATE_SCROLL
+	};
 
-	SSD1306_WRITECOMMAND(0xDB); //--set vcomh
-	SSD1306_WRITECOMMAND(0x20); //0x20,0.77xVcc
-	SSD1306_WRITECOMMAND(0x8D); //--set DC-DC enable
-	SSD1306_WRITECOMMAND(0x14); //
-	SSD1306_WRITECOMMAND(0xAF); //--turn on SSD1306 panel
-	
-
-	SSD1306_WRITECOMMAND(SSD1306_DEACTIVATE_SCROLL);
+	/*
+	 * Preserve the original command order, but verify every transaction. A
+	 * recovered bus does not imply that an earlier missed configuration command
+	 * was applied by the panel.
+	 */
+	for (size_t i = 0U;
+		 i < (sizeof(initialization_commands) /
+			  sizeof(initialization_commands[0]));
+		 i++) {
+		if (SSD1306_WRITECOMMAND(initialization_commands[i]) !=
+			SCREEN_STATUS_OK) {
+			return 0U;
+		}
+	}
 
 	/* Clear screen */
 	SSD1306_Fill(SSD1306_COLOR_BLACK);
 	
 	/* Update screen */
-	SSD1306_UpdateScreen();
+	if (SSD1306_UpdateScreen() == 0U) {
+		return 0U;
+	}
 	
 	/* Set default values */
 	SSD1306.CurrentX = 0;
@@ -118,15 +115,45 @@ uint8_t SSD1306_Init(void) {
 	return 1;
 }
 
-void SSD1306_UpdateScreen(void) {
+uint8_t SSD1306_UpdateScreenFromBuffer(const uint8_t *frame,
+									   uint16_t frame_size) {
 	uint8_t m;
-	for (m = 0; m < 8; m++) {
-		SSD1306_WRITECOMMAND(0xB0 + m);
-		SSD1306_WRITECOMMAND(0x02);
-		SSD1306_WRITECOMMAND(0x10);
-		/* Write multi data */
-		ssd1306_I2C_WriteMulti(SCREEN_ADDREES, 0x40, &SSD1306_Buffer[SSD1306_WIDTH * m], SSD1306_WIDTH);
+
+	if ((frame == NULL) || (frame_size != SSD1306_BUFFER_SIZE)) {
+		return 0U;
 	}
+
+	for (m = 0; m < 8; m++) {
+		if (SSD1306_WRITECOMMAND(0xB0 + m) != SCREEN_STATUS_OK ||
+			SSD1306_WRITECOMMAND(0x02) != SCREEN_STATUS_OK ||
+			SSD1306_WRITECOMMAND(0x10) != SCREEN_STATUS_OK) {
+			return 0U;
+		}
+		/* Write multi data */
+		if (ssd1306_I2C_WriteMulti(
+				SCREEN_ADDRESS,
+				0x40,
+				&frame[SSD1306_WIDTH * m],
+				SSD1306_WIDTH) != SCREEN_STATUS_OK) {
+			return 0U;
+		}
+	}
+	return 1U;
+}
+
+uint8_t SSD1306_UpdateScreen(void) {
+	return SSD1306_UpdateScreenFromBuffer(SSD1306_Buffer,
+										  SSD1306_BUFFER_SIZE);
+}
+
+uint8_t SSD1306_CopyBuffer(uint8_t *destination,
+						   uint16_t destination_size) {
+	if ((destination == NULL) || (destination_size != SSD1306_BUFFER_SIZE)) {
+		return 0U;
+	}
+
+	memcpy(destination, SSD1306_Buffer, SSD1306_BUFFER_SIZE);
+	return 1U;
 }
 
 void SSD1306_ToggleInvert(void) {

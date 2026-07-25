@@ -12,15 +12,15 @@ extern "C" {
 
 #define TASK_BUZZER_PRIORITY 2
 
-#define ARROW_SHOT_BIT          (1 << 0)
-#define ARCHERY_NO_ARROW_BIT    (1 << 1)
-#define METEOROID_DESTROY       (1 << 2)
-#define MUSIC_BACKGROUND        (1 << 3)
+#define ARROW_SHOT_BIT              (1U << 0)
+#define ARCHERY_NO_ARROW_BIT        (1U << 1)
+#define METEOROID_DESTROY           (1U << 2)
+#define MUSIC_BACKGROUND            (1U << 3)
+#define GAME_OVER_SOUND_BIT         (1U << 4)
+#define GAME_START_SOUND_BIT        (1U << 5)
 
 extern EventGroupHandle_t buzzer_event_state;
 extern void buzzer_task_create(void);
-extern void buzzer_play_tone_game_over(void);
-extern void buzzer_play_tone_game_begin(void);
 
 #ifdef __cplusplus
 }

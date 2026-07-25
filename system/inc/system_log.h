@@ -11,13 +11,20 @@ extern "C" {
 #include <stdio.h>
 #include <string.h>
 
-extern volatile bool IsDMALogBusy;
-
 #define TX_BUF_LOG_SIZE     128
 
-// extern void sys_log_debug(const char* fmt, ...);
-extern void sys_log_send_string(const char* s);
-extern void sys_log_send_char(char c);
+void sys_log_debug(const char* fmt, ...);
+void sys_log_send_string(const char* s);
+void sys_log_send_char(char c);
+
+/* Allocate the mutex/completion objects used once the scheduler is running. */
+bool sys_log_create_resources(void);
+
+/*
+ * Keep DMA ownership private to the logger. The ISR reports completion through
+ * this narrow API instead of modifying a driver global from another module.
+ */
+void sys_log_dma_complete_from_isr(void);
 #define DBG_LOG(fmt, ...)   sys_log_debug("[DBG]" fmt "\r\n", ##__VA_ARGS__)
 
 #ifdef __cplusplus

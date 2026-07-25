@@ -1,116 +1,178 @@
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
-#include <time.h>
-#include "system_init.h"
-#include "FreeRTOS.h"
-#include "timers.h"
-#include "semphr.h"
-#include "event_groups.h"
-#include "ssd1306.h"
+
 #include "meteoroid.h"
-#include "border.h"
-#include "screen_task.h"
-#include "buzzer_task.h"
-#include "event_groups.h"
+
 #include "bitmap.h"
+#include "game_state.h"
+#include "screen_task.h"
+#include "system_init.h"
 
-#include "cmsis_gcc.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "timers.h"
 
-volatile game_meteoroid_t game_meteoroid[METEROID_MAX_NUM];
-volatile TimerHandle_t meteoroid_timer = NULL;
-static volatile uint8_t meteoroid_index = 0;
-static volatile uint32_t timeToRandMeteoroid = 0;
-static uint32_t raw = 0;
-bool isGameOver = false;
-uint8_t meteoroid_timer_period = 120;
+game_meteoroid_t game_meteoroid[METEROID_MAX_NUM];
+TimerHandle_t meteoroid_timer = NULL;
+TaskHandle_t task_meteoroid_update_handle = NULL;
+uint32_t meteoroid_timer_period_ms = METEOROID_PERIOD_INITIAL_MS;
 
-void meteoroid_timer_callback(TimerHandle_t xTimer)
+static uint32_t last_spawn_tick = 0U;
+static bool cadence_started = false;
+
+static void meteoroid_timer_callback(TimerHandle_t timer)
 {
-    unused(xTimer);
-    if((sys_get_tick() - timeToRandMeteoroid) >= 300){
-        meteoroid_index = (rand() % METEROID_MAX_NUM);
-        if(game_meteoroid[meteoroid_index].visible != true){
-            game_meteoroid[meteoroid_index].visible = true;
-            game_meteoroid[meteoroid_index].x = METEOROID_X_START;
-            game_meteoroid[meteoroid_index].state = 0;
-        }
-        timeToRandMeteoroid = sys_get_tick();
+    (void)timer;
+
+    /*
+     * FreeRTOS executes every software timer callback in one daemon task.
+     * Notify a worker and return immediately so OLED, random generation and
+     * collision state can never delay unrelated timers.
+     */
+    xTaskNotifyGive(task_meteoroid_update_handle);
+}
+
+static void meteoroid_spawn_locked(uint32_t now)
+{
+    if (!cadence_started) {
+        /*
+         * Start the 300 ms spawn interval from the OK press, not from boot.
+         * Waiting on the splash therefore cannot create an instant meteor.
+         */
+        cadence_started = true;
+        last_spawn_tick = now;
+        return;
     }
 
-    for(uint8_t i = 0; i < METEROID_MAX_NUM; i++){
-        if(game_meteoroid[i].visible == true){
-            portENTER_CRITICAL();
-            SSD1306_DrawBitmap(game_meteoroid[i].x, game_meteoroid[i].y, game_meteoroid[i].action_img, METEOROID_WIDTH, METEOROID_HEIGH, !game_meteoroid[i].visible);  // clear old img
-            game_meteoroid[i].x -= METEOROID_RUN_STEP;
+    if ((uint32_t)(now - last_spawn_tick) < 300U) {
+        return;
+    }
 
-            if(game_meteoroid[i].x < METEOROID_X_THRESHOLD){
-                buzzer_play_tone_game_over();
-                portENTER_CRITICAL();
-                raw = sys_read_score_in_flash(ADD_TO_SAVE_SCORE);
-                if(raw == 0xFFFFFFFF){
-                    game_border.highest_score = 0;
-                }
-                else{
-                    game_border.highest_score = raw;
-                }
-                if(game_border.game_score > game_border.highest_score){
-                    sys_save_score_into_flash(ADD_TO_SAVE_SCORE, (uint32_t)game_border.game_score);
-                    game_border.highest_score = game_border.game_score;
-                }
-                portEXIT_CRITICAL();
-                xEventGroupSetBits(screen_event_state, SCREEN_GAME_OVER_BIT);
-                isGameOver = true;
-            }
+    uint8_t index = (uint8_t)(rand() % METEROID_MAX_NUM);
 
-            switch(game_meteoroid[i].state){
-                case 0:
-                    game_meteoroid[i].action_img = bitmap_meteoroid_I;
-                    game_meteoroid[i].state = 1;
-                    break;
-                case 1:
-                    game_meteoroid[i].action_img = bitmap_meteoroid_II;
-                    game_meteoroid[i].state = 2;
-                    break;
-                case 2:
-                    game_meteoroid[i].action_img = bitmap_meteoroid_III;
-                    game_meteoroid[i].state = 0;
-                    break;
-                default:
-                    break;
-            }
-            SSD1306_DrawBitmap(game_meteoroid[i].x, game_meteoroid[i].y, game_meteoroid[i].action_img, METEOROID_WIDTH, METEOROID_HEIGH, game_meteoroid[i].visible);
-            portEXIT_CRITICAL();
+    if (!game_meteoroid[index].visible) {
+        game_meteoroid[index].visible = true;
+        game_meteoroid[index].x = METEOROID_X_START;
+        game_meteoroid[index].state = 0U;
+        game_meteoroid[index].action_img = bitmap_meteoroid_I;
+    }
+
+    last_spawn_tick = now;
+}
+
+static bool meteoroid_update_locked(void)
+{
+    for (uint8_t i = 0U; i < METEROID_MAX_NUM; i++) {
+        if (!game_meteoroid[i].visible) {
+            continue;
+        }
+
+        game_meteoroid[i].x -= METEOROID_RUN_STEP;
+
+        switch (game_meteoroid[i].state) {
+            case 0U:
+                game_meteoroid[i].action_img = bitmap_meteoroid_I;
+                game_meteoroid[i].state = 1U;
+                break;
+
+            case 1U:
+                game_meteoroid[i].action_img = bitmap_meteoroid_II;
+                game_meteoroid[i].state = 2U;
+                break;
+
+            default:
+                game_meteoroid[i].action_img = bitmap_meteoroid_III;
+                game_meteoroid[i].state = 0U;
+                break;
+        }
+
+        if (game_meteoroid[i].x < METEOROID_X_THRESHOLD) {
+            return true;
         }
     }
-    xEventGroupSetBits(screen_event_state, SCREEN_UPDATE_BIT);
+
+    return false;
+}
+
+static void meteoroid_task_handler(void *param)
+{
+    (void)param;
+
+    for (;;) {
+        bool game_over;
+
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        game_state_lock();
+
+        /*
+         * Check mode while holding the object mutex.  Once game over publishes
+         * its transition, no delayed timer notification can mutate new state.
+         */
+        if (!screen_gameplay_is_running_locked()) {
+            game_state_unlock();
+            continue;
+        }
+
+        meteoroid_spawn_locked(sys_get_tick());
+        game_over = meteoroid_update_locked();
+        game_state_unlock();
+
+        if (game_over) {
+            screen_request_game_over();
+        } else {
+            screen_request_frame();
+        }
+    }
+}
+
+void meteoroid_reset_for_new_game(void)
+{
+    game_state_lock();
+
+    for (uint8_t i = 0U; i < METEROID_MAX_NUM; i++) {
+        game_meteoroid[i].action_img = bitmap_meteoroid_I;
+        game_meteoroid[i].x = METEOROID_X_START;
+        game_meteoroid[i].y =
+            (int16_t)(METEOROID_Y_START +
+                      ((int16_t)i * METEOROID_Y_OFFSET));
+        game_meteoroid[i].visible = false;
+        game_meteoroid[i].state = 0U;
+    }
+
+    /*
+     * These private cadence fields are session state too.  Resetting them makes
+     * the first spawn delay identical on every play-through.
+     */
+    last_spawn_tick = 0U;
+    cadence_started = false;
+    meteoroid_timer_period_ms = METEOROID_PERIOD_INITIAL_MS;
+
+    game_state_unlock();
 }
 
 void meteoroid_task_create(void)
 {
-    for(uint8_t i = 0; i < METEROID_MAX_NUM; i++){
-        game_meteoroid[i].action_img = bitmap_meteoroid_I;
-        game_meteoroid[i].x = METEOROID_X_START;
-        if(i == 0){
-            game_meteoroid[i].y = METEOROID_Y_START;
-        }
-        else{
-            game_meteoroid[i].y = game_meteoroid[i-1].y + METEOROID_Y_OFFSET;
-        }
-        game_meteoroid[i].visible = false;
-        game_meteoroid[i].state = 0;
-    }
-    meteoroid_timer = xTimerCreate("timer update meteoroid", pdMS_TO_TICKS(meteoroid_timer_period), pdTRUE, NULL, meteoroid_timer_callback);
-    if(meteoroid_timer == NULL){
-        __disable_irq();
-        while(true);
-    }
+    BaseType_t status;
+
+    /* Boot and soft restart deliberately share one initialization path. */
+    meteoroid_reset_for_new_game();
+
+    status = xTaskCreate(meteoroid_task_handler, "meteoroid update", 512U,
+                         NULL, 2U, &task_meteoroid_update_handle);
+    configASSERT(status == pdPASS);
+
+    meteoroid_timer =
+        xTimerCreate("meteoroid cadence",
+                     pdMS_TO_TICKS(meteoroid_timer_period_ms),
+                     pdTRUE, NULL, meteoroid_timer_callback);
+    configASSERT(meteoroid_timer != NULL);
+
     srand(sys_get_tick());
-    xTimerStart(meteoroid_timer, pdMS_TO_TICKS(500));
+
+    /*
+     * Timer remains dormant until screen_start_game() handles the user's OK
+     * press.  This is the key behavioral change from the countdown design.
+     */
 }
-
-
-
-
-
-

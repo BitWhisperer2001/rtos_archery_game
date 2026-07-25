@@ -15,7 +15,7 @@ extern "C" {
 
 #define ARCHERY_INIT_BIT        (1 << 0)
 #define ARCHERY_UP_BIT          (1 << 1)
-#define ARCHERY_DOWN_BIT        (1 << 22)
+#define ARCHERY_DOWN_BIT        (1 << 2)
 
 #define ARCHERY_DOWN_THRESHOLD  (38)
 #define ARCHERY_UP_THRESHOLD    (2)
@@ -34,10 +34,11 @@ typedef struct {
 }game_archery_t;
 
 extern EventGroupHandle_t archery_event_state;
-extern volatile game_archery_t game_archery;
+extern game_archery_t game_archery;
 extern TaskHandle_t task_archery_update_handle;
 
 extern void archery_task_create(void);
+void archery_reset_for_new_game(void);
 
 #ifdef __cplusplus
 }

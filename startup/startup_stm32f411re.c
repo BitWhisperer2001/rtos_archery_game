@@ -1,25 +1,18 @@
 #include <stdint.h>
-#include <stdbool.h>
 #include "app.h"
 #include "cmsis_gcc.h"
-
-// #include "led.h"
-// #include "system_init.h"
-
-#define SRAM_START      0x20000000U
-#define SRAM_SIZE       (128 * 1024)   // 128KB
-#define SRAM_END        ((SRAM_START) + (SRAM_SIZE))
-
-#define STACK_START     SRAM_END
+#include "system_fault.h"
+#include "system_stm32f4xx.h"
 
 void __libc_init_array(void);
 
+/* These addresses are produced by linker_scripts.ld, not normal C objects. */
+extern uint32_t __StackTop;
+extern uint32_t _sidata;
 extern uint32_t _sdata;
 extern uint32_t _edata;
 extern uint32_t _sbss;
 extern uint32_t _ebss;
-extern uint32_t _etext;
-extern uint32_t _la_data;
 
 void Default_Handler(void);
 void Reset_Handler(void);
@@ -90,8 +83,14 @@ void FPU_IRQHandler(void) __attribute__((weak, alias("Default_Handler")));
 void SPI4_IRQHandler(void) __attribute__((weak, alias("Default_Handler")));
 void SPI5_IRQHandler(void) __attribute__((weak, alias("Default_Handler")));
 
-uint32_t vectors[] __attribute__((section(".isr_section"))) = {
-    STACK_START,                    // 0  - Stack pointer
+/*
+ * "used" and KEEP() in the linker script protect the table when section
+ * garbage collection is enabled. The 512-byte alignment also permits future
+ * VTOR relocation without violating Cortex-M4 alignment requirements.
+ */
+const uint32_t vectors[]
+    __attribute__((section(".isr_vector"), used, aligned(512))) = {
+    (uint32_t)&__StackTop,          // 0  - Initial main stack pointer
     (uint32_t)&Reset_Handler,       // 1  - Reset
     (uint32_t)&NMI_Handler,         // 2  - NMI
     (uint32_t)&HardFault_Handler,   // 3  - HardFault
@@ -198,36 +197,48 @@ uint32_t vectors[] __attribute__((section(".isr_section"))) = {
 
 void Default_Handler(void)
 {
-    __disable_irq();
-    while(1);
-    // {
-    //     led_toggle();
-    //     System_Delay(50);
-    // }
+    /*
+     * Route every unexpected exception through the same retained recorder.
+     * system_panic also stores IPSR, so the exact vector survives reset.
+     */
+    system_panic(SYSTEM_PANIC_UNHANDLED_EXCEPTION);
 }
 
 void Reset_Handler(void)
 {
-    // 1. copy data section from FLASH to RAM
-    uint32_t size = &_edata - &_sdata;      // Get size of data section
-    uint32_t *pSrc = (uint32_t*)&_la_data;    // FLASH
-    uint32_t *pDst = (uint32_t*)&_sdata;    // RAM
+    const uint32_t *src = &_sidata;
+    uint32_t *dst = &_sdata;
 
-    for(uint32_t i = 0; i < size; i++)
-        *pDst++ = *pSrc++;
+    /* Copy initialized objects from their Flash load address into SRAM. */
+    while (dst < &_edata) {
+        *dst++ = *src++;
+    }
 
-    // 2. Init bss on RAM
-    size = &_ebss - &_sbss;
-    pDst = (uint32_t*)&_sbss;
+    /* C requires every object in .bss to be zero before any C code uses it. */
+    dst = &_sbss;
+    while (dst < &_ebss) {
+        *dst++ = 0U;
+    }
 
-    for(uint32_t i = 0; i < size; i++)
-        *pDst++ = 0;
+    /*
+     * CMSIS early initialization enables the FPU, configures the 100 MHz clock
+     * safely (voltage scale/cache/Flash latency), and establishes VTOR before
+     * the application or the C library can use those facilities.
+     */
+    SystemInit();
+    __libc_init_array();
 
-    __libc_init_array();    // Init 'C' standard library
-
-    // 3. Call main
+    /*
+     * Reset starts with interrupts enabled, but make the intended state
+     * explicit because the pre-scheduler splash screen relies on TIM2.
+     */
     __enable_irq();
-    
-    main();
+    (void)main();
+
+    /* A scheduler-start failure must never return through an invalid LR. */
+    __disable_irq();
+    while (1) {
+        __WFI();
+    }
 }
 

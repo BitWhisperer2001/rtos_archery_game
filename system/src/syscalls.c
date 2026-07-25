@@ -7,14 +7,16 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/times.h>
+#include <stdint.h>
+
+#include "system_fault.h"
+#include "system_log.h"
 
 /* Variables */
-//#undef errno
-extern int errno;
-extern int __io_putchar(int ch) __attribute__((weak));
-extern int __io_getchar(void) __attribute__((weak));
-
-register char * stack_ptr asm("sp");
+/* errno is supplied by newlib; redeclaring it breaks re-entrant configurations. */
+/* Linker-owned bounds keep libc allocations away from the reserved main stack. */
+extern char __heap_start__;
+extern char __heap_end__;
 
 char *__env[1] = { 0 };
 char **environ = __env;
@@ -22,7 +24,8 @@ char **environ = __env;
 
 
 /* Functions */
-void initialise_monitor_handles()
+/* Explicit void prototype keeps this semihosting compatibility hook warning-free. */
+void initialise_monitor_handles(void)
 {
 }
 
@@ -41,32 +44,36 @@ int _kill(int pid, int sig)
 
 void _exit (int status)
 {
-	_kill(status, -1);
-	while (1) {}		/* Make sure we hang here */
+	/* libc termination is a firmware fault, not a valid process lifecycle. */
+	(void)status;
+	system_panic(SYSTEM_PANIC_LIBC_EXIT);
 }
 
 __attribute__((weak)) int _read(int file, char *ptr, int len)
 {
+	/*
+	 * UART RX is not part of this project's console contract. Return a defined
+	 * error instead of calling an unresolved weak function at address zero.
+	 */
 	(void)file;
-	int DataIdx;
-
-	for (DataIdx = 0; DataIdx < len; DataIdx++)
-	{
-		*ptr++ = __io_getchar();
-	}
-
-return len;
+	(void)ptr;
+	(void)len;
+	errno = ENOSYS;
+	return -1;
 }
 
 __attribute__((weak)) int _write(int file, char *ptr, int len)
 {
 	(void)file;
-	int DataIdx;
+	int data_index;
 
-	for (DataIdx = 0; DataIdx < len; DataIdx++)
-	{
-		__io_putchar(*ptr++);
-		//ITM_SendChar(*ptr++);
+	/* Route stdio through the board's concrete UART implementation. */
+	if ((ptr == NULL) || (len < 0)) {
+		errno = EINVAL;
+		return -1;
+	}
+	for (data_index = 0; data_index < len; data_index++) {
+		sys_log_send_char(ptr[data_index]);
 	}
 	return len;
 }
@@ -163,21 +170,27 @@ int _execve(char *name, char **argv, char **env)
 **/
 caddr_t _sbrk(int incr)
 {
-	extern char end asm("end");
-	static char *heap_end;
-	char *prev_heap_end;
+	static uintptr_t heap_current;
+	uintptr_t heap_start = (uintptr_t)&__heap_start__;
+	uintptr_t heap_limit = (uintptr_t)&__heap_end__;
+	uintptr_t previous;
 
-	if (heap_end == 0)
-		heap_end = &end;
+	/* Initialize lazily because the symbols are resolved only by the linker. */
+	if (heap_current == 0U) {
+		heap_current = heap_start;
+	}
+	previous = heap_current;
 
-	prev_heap_end = heap_end;
-	if (heap_end + incr > stack_ptr)
-	{
+	/*
+	 * Check both growth and shrink operations without signed pointer overflow.
+	 * Newlib receives ENOMEM instead of silently corrupting RTOS or stack RAM.
+	 */
+	if ((incr >= 0 && (uintptr_t)incr > (heap_limit - heap_current)) ||
+	    (incr < 0 && (uintptr_t)(-(int64_t)incr) > (heap_current - heap_start))) {
 		errno = ENOMEM;
-		return (caddr_t) -1;
+		return (caddr_t)-1;
 	}
 
-	heap_end += incr;
-
-	return (caddr_t) prev_heap_end;
+	heap_current = (uintptr_t)((int64_t)heap_current + (int64_t)incr);
+	return (caddr_t)previous;
 }

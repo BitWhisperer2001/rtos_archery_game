@@ -3,75 +3,50 @@
 
 #include "stm32f4xx_gpio.h"
 #include "stm32f4xx_rcc.h"
+
 #include "button.h"
 
-void button_setup(uint32_t button)
+void button_setup(uint32_t buttons)
 {
-    GPIO_InitTypeDef GPIO_InitStructure;
-    switch(button) {
-        case BT_DOWN:
-            GPIO_StructInit(&GPIO_InitStructure);
-            RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
-            GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
-            GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
-            GPIO_InitStructure.GPIO_Pin = BT_DOWN;
-            GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
-            GPIO_InitStructure.GPIO_Speed = GPIO_Medium_Speed;
-            GPIO_Init(GPIOB, &GPIO_InitStructure);
-            break;
-        case BT_UP:
-            GPIO_StructInit(&GPIO_InitStructure);
-            RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
-            GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
-            GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
-            GPIO_InitStructure.GPIO_Pin = BT_UP;
-            GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
-            GPIO_InitStructure.GPIO_Speed = GPIO_Medium_Speed;
-            GPIO_Init(GPIOA, &GPIO_InitStructure);
-            break;
-        case BT_OK:
-            GPIO_StructInit(&GPIO_InitStructure);
-            RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
-            GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
-            GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
-            GPIO_InitStructure.GPIO_Pin = BT_OK;
-            GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
-            GPIO_InitStructure.GPIO_Speed = GPIO_Medium_Speed;
-            GPIO_Init(GPIOA, &GPIO_InitStructure);
-            break;
-        default:
-            GPIO_StructInit(&GPIO_InitStructure);
-            RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
-            RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
-            GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
-            GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
-            GPIO_InitStructure.GPIO_Pin = BT_DOWN | BT_OK;
-            GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
-            GPIO_InitStructure.GPIO_Speed = GPIO_Medium_Speed;
-            GPIO_Init(GPIOB, &GPIO_InitStructure);
-            GPIO_InitStructure.GPIO_Pin = BT_UP;
-            GPIO_Init(GPIOA, &GPIO_InitStructure);
-            break;
+    GPIO_InitTypeDef gpio;
+
+    /* PB0: BT_DOWN, PB3: BT_OK */
+    uint16_t gpio_b_pins = (uint16_t)(buttons & (BT_DOWN | BT_OK));
+
+    if (gpio_b_pins != 0U) {
+        RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+        GPIO_StructInit(&gpio);
+        gpio.GPIO_Pin = gpio_b_pins;
+        gpio.GPIO_Mode = GPIO_Mode_IN;
+        gpio.GPIO_PuPd = GPIO_PuPd_NOPULL;
+        gpio.GPIO_Speed = GPIO_Medium_Speed;
+        GPIO_Init(GPIOB, &gpio);
+    }
+
+    /* PA4: BT_UP */
+    if ((buttons & BT_UP) != 0U) {
+        RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+        GPIO_StructInit(&gpio);
+        gpio.GPIO_Pin = BT_UP;
+        gpio.GPIO_Mode = GPIO_Mode_IN;
+        gpio.GPIO_PuPd = GPIO_PuPd_NOPULL;
+        gpio.GPIO_Speed = GPIO_Medium_Speed;
+        GPIO_Init(GPIOA, &gpio);
     }
 }
 
 bool button_read(uint32_t button)
 {
-    bool bt_status = false;
-    switch(button) {
+    switch (button) {
         case BT_DOWN:
-            bt_status = GPIO_ReadInputDataBit(GPIOB, BT_DOWN);
-            break;
+            return GPIO_ReadInputDataBit(GPIOB, BT_DOWN) != Bit_RESET;
         case BT_UP:
-            bt_status = GPIO_ReadInputDataBit(GPIOA, BT_UP);
-            break;
+            return GPIO_ReadInputDataBit(GPIOA, BT_UP) != Bit_RESET;
         case BT_OK:
-            bt_status = GPIO_ReadInputDataBit(GPIOB, BT_OK);
-            break;
+            return GPIO_ReadInputDataBit(GPIOB, BT_OK) != Bit_RESET;
         default:
-            break;
+            return true;
     }
-    return bt_status;
 }
 
 

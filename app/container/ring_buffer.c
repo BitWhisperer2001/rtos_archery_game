@@ -1,56 +1,63 @@
 #include "ring_buffer.h"
-#include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <stdlib.h>
 
-void ring_buff_init(ring_buff_t *rb, int size)
+bool ring_buffer_init(ring_buffer_t *ring, int *storage, size_t capacity)
 {
-    rb->buff = NULL;
-    rb->buff = (int*)malloc(size * sizeof(int));
-    if(rb->buff == NULL){
-        while(true);
+    /* Reject invalid ownership up front; a zero-capacity modulo is undefined. */
+    if ((ring == NULL) || (storage == NULL) || (capacity == 0U)) {
+        return false;
     }
-    rb->count = 0;
-    rb->head = 0;
-    rb->tail = 0;
-    rb->size = size;
-    for(uint8_t i = 0; i < size; i++){
-        rb->buff[i] = -1;
+
+    ring->buffer = storage;
+    ring->capacity = capacity;
+    ring->head = 0U;
+    ring->tail = 0U;
+    ring->count = 0U;
+    return true;
+}
+
+bool ring_buffer_post(ring_buffer_t *ring, int value)
+{
+    /*
+     * Never overwrite unread data silently. The caller explicitly chooses how
+     * to handle back-pressure when the fixed-capacity container is full.
+     */
+    if ((ring == NULL) || (ring->buffer == NULL) ||
+        ring_buffer_is_full(ring)) {
+        return false;
     }
+
+    ring->buffer[ring->tail] = value;
+    ring->tail = (ring->tail + 1U) % ring->capacity;
+    ring->count++;
+    return true;
 }
 
-void ring_buff_post(ring_buff_t *rb, int data)
+bool ring_buffer_get(ring_buffer_t *ring, int *value)
 {
-    rb->buff[rb->tail] = data;
-    rb->tail = (rb->tail + 1) % rb->size;
-    rb->count++;
+    /* An output parameter separates empty-state from every valid int value. */
+    if ((ring == NULL) || (ring->buffer == NULL) || (value == NULL) ||
+        ring_buffer_is_empty(ring)) {
+        return false;
+    }
+
+    *value = ring->buffer[ring->head];
+    ring->head = (ring->head + 1U) % ring->capacity;
+    ring->count--;
+    return true;
 }
 
-int ring_buff_get(ring_buff_t *rb)
+bool ring_buffer_is_full(const ring_buffer_t *ring)
 {
-    int item;
-    item = rb->buff[rb->head];
-    rb->buff[rb->head] = -1;
-    rb->head = (rb->head + 1) % rb->size;
-    rb->count--;
-    return item;
+    return (ring != NULL) && (ring->capacity != 0U) &&
+           (ring->count == ring->capacity);
 }
 
-int ring_is_full(ring_buff_t *rb)
+bool ring_buffer_is_empty(const ring_buffer_t *ring)
 {
-    return rb->count == rb->size;
+    return (ring == NULL) || (ring->count == 0U);
 }
 
-int ring_is_empty(ring_buff_t *rb)
+size_t ring_buffer_count(const ring_buffer_t *ring)
 {
-    return rb->count == 0;
+    return (ring != NULL) ? ring->count : 0U;
 }
-
-int ring_get_element_count(ring_buff_t *rb)
-{
-    return rb->count;
-}
-
-
-

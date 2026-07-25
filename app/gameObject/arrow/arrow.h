@@ -7,10 +7,11 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdbool.h>
+
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
-#include "ring_buffer.h"
+#include "queue.h"
 
 #define TASK_ARROW_UPDATE_PRIORITY  (2)
 
@@ -27,13 +28,13 @@ typedef struct {
     const unsigned char *action_img;
 }game_arrow_t;
 
-extern game_arrow_t game_arrow[ARROW_MAX_NUM + 1];
-extern ring_buff_t arrow_buff;
+extern QueueHandle_t arrow_free_queue;
+extern game_arrow_t game_arrow[ARROW_MAX_NUM];
 extern SemaphoreHandle_t semphr_task_arrow_update;
-extern volatile uint8_t arrow_num_index;
 extern TaskHandle_t task_arrow_update_handle;
 
 extern void arrow_task_create(void);
+void arrow_reset_for_new_game(void);
 
 #ifdef __cplusplus
 }
