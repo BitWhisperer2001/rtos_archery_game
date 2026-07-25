@@ -4,11 +4,31 @@
 #include "stm32f4xx_gpio.h"
 #include "stm32f4xx_tim.h"
 #include "buzzer.h"
-#include "FreeRTOS.h"
-#include "task.h"
 
 #define TIM3_CLOCK_HZ   (100000U)
 #define WHOLENOTE_MS(bpm)  ((60000 * 4) / (bpm))
+
+static void buzzer_apply_pwm(uint16_t auto_reload, uint16_t compare)
+{
+    /*
+     * ARR and CCR1 both use preload.  A software update event commits them as
+     * one atomic PWM configuration and resets the time base immediately.
+     *
+     * Without UG, the first note after power-on waits for the boot ARR
+     * (49999 ticks, roughly 500 ms) to expire.  The short notes in
+     * SOUND_GAME_START are then overwritten before ever reaching the output.
+     */
+    TIM_SetAutoreload(TIM3, auto_reload);
+    TIM_SetCompare1(TIM3, compare);
+    TIM_SetCounter(TIM3, 0U);
+    TIM_GenerateEvent(TIM3, TIM_EventSource_Update);
+
+    /*
+     * UG also sets UIF.  This driver does not use the update interrupt, but
+     * clearing the flag leaves TIM3 in a deterministic state for diagnostics.
+     */
+    TIM_ClearFlag(TIM3, TIM_FLAG_Update);
+}
 
 static void buzzer_io_timer3_channel1_config(void)
 {
@@ -47,19 +67,34 @@ static void buzzer_timer3_pwm_config(void)
     TIM_TimeBaseInit(TIM3, &TIM_InitStructure);
     OC1_InitStructure.TIM_OCMode = TIM_OCMode_PWM1;
     OC1_InitStructure.TIM_OutputState = TIM_OutputState_Enable;
-    OC1_InitStructure.TIM_Pulse = 24999;
+    /*
+     * Cold-start silently.  Driving 50% duty here produced an audible pop
+     * before the buzzer task had selected its first real note.
+     */
+    OC1_InitStructure.TIM_Pulse = 0U;
     OC1_InitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
     TIM_OC1Init(TIM3, &OC1_InitStructure);
     TIM_OC1PreloadConfig(TIM3, TIM_OCPreload_Enable);
     TIM_ARRPreloadConfig(TIM3, ENABLE);
+
+    /*
+     * Commit the silent preload before enabling the counter.  The timer output
+     * is therefore known-low when PA6 is later connected to the alternate
+     * function, avoiding a GPIO-to-PWM transition glitch.
+     */
+    buzzer_apply_pwm((uint16_t)TIM3_PERIOD, 0U);
     TIM_Cmd(TIM3, ENABLE);
 }
 
 void buzzer_start(void)
 {
-    buzzer_io_timer3_channel1_config();
+    /*
+     * Configure and silence TIM3 while PA6 is still disconnected from its
+     * alternate function.  Connect the physical buzzer only after PWM state is
+     * deterministic.
+     */
     buzzer_timer3_pwm_config();
-    // buzzer_stop();
+    buzzer_io_timer3_channel1_config();
 }
 
 uint32_t buzzer_play_tones(const Tone_TypeDef tones, uint16_t bpm)
@@ -100,12 +135,15 @@ uint32_t buzzer_play_tones(const Tone_TypeDef tones, uint16_t bpm)
 
     uint32_t arr = ((TIM3_CLOCK_HZ / tones.freq) - 1U);
     uint32_t ccr = ((arr + 1U) / 2U);
-    TIM_SetAutoreload(TIM3, (uint16_t)arr);
-    TIM_SetCompare1(TIM3, (uint16_t)ccr);
+    buzzer_apply_pwm((uint16_t)arr, (uint16_t)ccr);
     return noteDuration;
 }
 
 void buzzer_stop(void)
 {
-    TIM_SetCompare1(TIM3, 0);
+    /*
+     * Commit silence immediately instead of waiting for the next PWM overflow.
+     * This also gives every note its intended 10% inter-note quiet interval.
+     */
+    buzzer_apply_pwm((uint16_t)TIM3->ARR, 0U);
 }
